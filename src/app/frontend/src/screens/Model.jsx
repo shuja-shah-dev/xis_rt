@@ -1,0 +1,175 @@
+import React, { useState } from "react";
+import RoundedButton from "../components/RoundedButton";
+
+const Model = () => {
+  const [selected, setSelected] = useState(null);
+
+  const categories = [
+    {
+      name: "Generic",
+      models: [{ id: "general", name: "General Model" }],
+    },
+    {
+      name: "Baget",
+      models: [
+        { id: "baget-twin", name: "Twin Model" },
+        { id: "baget-real", name: "Real Data Model" },
+      ],
+    },
+    {
+      name: "Raw",
+      models: [
+        { id: "raw-twin", name: "Twin Model" },
+        { id: "raw-real", name: "Real Data Model" },
+      ],
+    },
+  ];
+
+  const handleSelect = (id) => setSelected(id);
+  const handleDisconnect = () => setSelected(null);
+
+  return (
+    <div>
+      <p className="text-3xl font-semibold">Model Configuration</p>
+      <p className="text-sm text-[#73768D]">
+        Select desired model from the following categories.
+      </p>
+
+      <div className="flex gap-6 mt-6">
+        {categories.slice(0, 2).map((category) => (
+          <div
+            key={category.name}
+            className="relative flex flex-col gap-8 border-2 rounded-[12px] border-[#0E2332] bg-[rgba(255,255,255,0.05)] backdrop-blur-[28.55px] py-5 px-8 w-1/2"
+          >
+            <p className="text-2xl">{category.name}</p>
+
+            <div className="flex gap-10 flex-wrap">
+              {category.models.map((model) => {
+                const isSelected = selected === model.id;
+                const status = isSelected ? "Selected" : "Not Selected";
+
+                return (
+                  <div
+                    key={model.id}
+                    className={`group w-[335px] h-[160px] border-[0.5px] rounded-[12px] p-5 backdrop-blur-[110.57px] transition 
+                      ${
+                        isSelected
+                          ? "border-[#1272E5]"
+                          : "border-[rgba(255,255,255,0.16)] bg-[rgba(0,0,0,0.03)] hover:border-[#1272E5]"
+                      }`}
+                  >
+                    <div className="flex justify-between items-center">
+                      <p className="text-lg font-medium">{model.name}</p>
+
+                      <div className="flex items-center gap-2">
+                        {isSelected && (
+                          <div
+                            className="cursor-pointer"
+                            onClick={handleDisconnect}
+                          >
+                            <img
+                              src="/disconnector.svg"
+                              alt="Disconnector"
+                              width={21}
+                              height={21}
+                            />
+                          </div>
+                        )}
+                        {/* <div
+                          className={`text-[10px] font-semibold rounded-4xl py-1 px-5 ${
+                            status === "Selected"
+                              ? "bg-[#1AA64B]"
+                              : "bg-[#FF4C40]"
+                          }`}
+                        >
+                          {status}
+                        </div> */}
+                      </div>
+                    </div>
+
+                    <div className="mt-2 h-[0.5px] bg-[linear-gradient(90deg,rgba(255,255,255,0)_0%,rgba(255,255,255,0.31)_52.4%,rgba(255,255,255,0)_100%)]"></div>
+
+                    <div className="mt-6">
+                      <RoundedButton
+                        label="Select"
+                        active={isSelected}
+                        onClick={() => handleSelect(model.id)}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div
+        key={categories[2].name}
+        className="relative flex flex-col gap-8 border-2 rounded-[12px] border-[#0E2332] bg-[rgba(255,255,255,0.05)] backdrop-blur-[28.55px] py-5 px-8 mt-6 w-full"
+      >
+        <p className="text-2xl">{categories[2].name}</p>
+
+        <div className="flex gap-10 flex-wrap">
+          {categories[2].models.map((model) => {
+            const isSelected = selected === model.id;
+            const status = isSelected ? "Selected" : "Not Selected";
+
+            return (
+              <div
+                key={model.id}
+                className={`group w-[335px] h-[160px] border-[0.5px] rounded-[12px] p-5 backdrop-blur-[110.57px] transition 
+                  ${
+                    isSelected
+                      ? "border-[#1272E5]"
+                      : "border-[rgba(255,255,255,0.16)] bg-[rgba(0,0,0,0.03)] hover:border-[#1272E5]"
+                  }`}
+              >
+                <div className="flex justify-between items-center">
+                  <p className="text-lg font-medium">{model.name}</p>
+
+                  <div className="flex items-center gap-2">
+                    {isSelected && (
+                      <div
+                        className="cursor-pointer"
+                        onClick={handleDisconnect}
+                      >
+                        <img
+                          src="/disconnector.svg"
+                          alt="Disconnector"
+                          width={21}
+                          height={21}
+                        />
+                      </div>
+                    )}
+                    {/* <div
+                      className={`text-[10px] font-semibold rounded-4xl py-1 px-5 ${
+                        status === "Selected"
+                          ? "bg-[#1AA64B]"
+                          : "bg-[#FF4C40]"
+                      }`}
+                    >
+                      {status}
+                    </div> */}
+                  </div>
+                </div>
+
+                <div className="mt-2 h-[0.5px] bg-[linear-gradient(90deg,rgba(255,255,255,0)_0%,rgba(255,255,255,0.31)_52.4%,rgba(255,255,255,0)_100%)]"></div>
+
+                <div className="mt-6">
+                  <RoundedButton
+                    label="Select"
+                    active={isSelected}
+                    onClick={() => handleSelect(model.id)}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Model;
