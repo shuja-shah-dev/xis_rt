@@ -2,9 +2,11 @@ import React, { useState } from "react";
 import CameraSelector from "../components/CameraComponents/CameraSelector";
 import CameraPreview from "../components/CameraComponents/CameraPreview";
 import CTIUploader from "../components/CameraComponents/CTIUploader";
+import VideoUploader from "../components/CameraComponents/VideoUploader"; // <-- new
 
-const Camera = ({setActiveScreen }) => {
+const Camera = ({ setActiveScreen }) => {
   const [step, setStep] = useState(1);
+  const [cameraType, setCameraType] = useState(null); // store selected
 
   return (
     <div>
@@ -13,6 +15,7 @@ const Camera = ({setActiveScreen }) => {
         Initialize camera quickly for seamless, accurate real-time inference
       </p>
 
+      {/* progress indicator */}
       <div className="flex justify-center mt-6">
         <div className="flex items-center w-[40%]">
           {[1, 2, 3].map((num, idx) => (
@@ -27,15 +30,13 @@ const Camera = ({setActiveScreen }) => {
                 >
                   {num}
                 </div>
-                <p
-                  className={`text-sm mt-2 ${
-                    step === num ? "" : "text-[#9A9A9A]"
-                  }`}
-                >
+                <p className={`text-sm mt-2 ${step === num ? "" : "text-[#9A9A9A]"}`}>
                   {num === 1
                     ? "Camera Selection"
                     : num === 2
-                    ? "Upload CTI File"
+                    ? cameraType === "video"
+                      ? "Upload Video"
+                      : "Upload CTI File"
                     : "Preview"}
                 </p>
               </div>
@@ -45,13 +46,29 @@ const Camera = ({setActiveScreen }) => {
         </div>
       </div>
 
+      {/* steps */}
       <div className="mt-12">
-        {step === 1 && <CameraSelector onNext={() => setStep(2)} />}
-        {step === 2 && (
-          <CTIUploader onNext={() => setStep(3)} onBack={() => setStep(1)} />
+        {step === 1 && (
+          <CameraSelector
+            onNext={(selected) => {
+              setCameraType(selected);
+              setStep(2);
+            }}
+          />
         )}
+
+        {step === 2 &&
+          (cameraType === "video" ? (
+            <VideoUploader onNext={() => setStep(3)} onBack={() => setStep(1)} />
+          ) : (
+            <CTIUploader onNext={() => setStep(3)} onBack={() => setStep(1)} />
+          ))}
+
         {step === 3 && (
-          <CameraPreview onNext={() => setActiveScreen("Model")} onBack={() => setStep(2)} />
+          <CameraPreview
+            onNext={() => setActiveScreen("Model")}
+            onBack={() => setStep(2)}
+          />
         )}
       </div>
     </div>

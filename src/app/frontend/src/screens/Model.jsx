@@ -10,16 +10,16 @@ const Model = () => {
       models: [{ id: "general", name: "General Model" }],
     },
     {
-      name: "Baget",
+      name: "Baguette",
       models: [
-        { id: "baget-twin", name: "Twin Model" },
-        { id: "baget-real", name: "Real Data Model" },
+        { id: "Baguette-twin", name: "Digital Twin Model" },
+        { id: "Baguette-real", name: "Real Data Model" },
       ],
     },
     {
       name: "Raw",
       models: [
-        { id: "raw-twin", name: "Twin Model" },
+        { id: "raw-twin", name: "Digital Twin Model" },
         { id: "raw-real", name: "Real Data Model" },
       ],
     },
@@ -46,7 +46,7 @@ const Model = () => {
             <div className="flex gap-10 flex-wrap">
               {category.models.map((model) => {
                 const isSelected = selected === model.id;
-                const status = isSelected ? "Selected" : "Not Selected";
+                // const status = isSelected ? "Selected" : "Not Selected";
 
                 return (
                   <div
@@ -113,7 +113,7 @@ const Model = () => {
         <div className="flex gap-10 flex-wrap">
           {categories[2].models.map((model) => {
             const isSelected = selected === model.id;
-            const status = isSelected ? "Selected" : "Not Selected";
+            // const status = isSelected ? "Selected" : "Not Selected";
 
             return (
               <div

@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-const CTIUploader = ({ onNext, onBack }) => {
+const VideoUploader = ({ onNext, onBack }) => {
   const [file, setFile] = useState(null);
 
   const handleDrop = (e) => {
@@ -21,7 +21,7 @@ const CTIUploader = ({ onNext, onBack }) => {
 
   return (
     <div className="flex flex-col gap-8 border-2 rounded-[12px] border-[#0E2332] bg-[rgba(255,255,255,0.05)] backdrop-blur-[106.0999984741211px] py-5 px-8">
-      <p className="text-2xl">Upload Camera CTI File</p>
+      <p className="text-2xl">Upload Video File</p>
 
       {!file ? (
         <div
@@ -64,4 +64,5 @@ const CTIUploader = ({ onNext, onBack }) => {
   );
 };
 
-export default CTIUploader;
+export default VideoUploader;
+

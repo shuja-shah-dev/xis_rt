@@ -4,3 +4,6 @@ paho-mqtt==1.6.1
 pydantic==2.5.0
 python-multipart==0.0.6
 pydantic-settings
+Flask
+flask-cors
+flask-mqtt

@@ -1,9 +1,11 @@
 class Settings:
-    def __init__(self):
-        self.app_name = "FastAPI MQTT Application"
-        self.mqtt_broker_host = "localhost"
-        self.mqtt_broker_port = 1883
-        self.mqtt_topic = "sensor/data"
-        self.mqtt_client_id = "fastapi_client"
+    MQTT_BROKER_URL = "localhost"
+    MQTT_BROKER_PORT = 1883
+    MQTT_USERNAME = None
+    MQTT_PASSWORD = None
+    MQTT_CLIENT_ID = "flask-mqtt-client"
+    MQTT_KEEPALIVE = 60
+    MQTT_TLS_ENABLED = False
+    MQTT_LOGGING = True
 
 settings = Settings()
