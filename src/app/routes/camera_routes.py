@@ -18,6 +18,7 @@ def configure_camera():
             cti_file_location = os.path.join("cti", cti_filename)
             cti_file.save(cti_file_location)
             app_config.set_camera_config(cti_file_location)
+
             return jsonify(
                 {
                     "status": "success",
