@@ -15,11 +15,11 @@ def init_mqtt(app):
         global connected
         if rc == 0:
             connected = True
-            print("✅ Connected to MQTT broker")
+            print("Connected to MQTT broker")
             mqtt.subscribe("test/topic")
             mqtt.subscribe("detection/results")
         else:
-            print(f"❌ Failed to connect. Code={rc}")
+            print(f"Failed to connect. Code={rc}")
 
     @mqtt.on_message()
     def handle_message(client, userdata, msg):

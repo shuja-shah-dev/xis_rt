@@ -48,7 +48,7 @@ class GenICamService:
         self.clients_lock = threading.Lock()
         self.display_width = 1280
         self.display_height = 720
-        self.stream_mode = "none"  # "none", "normal", "inference"
+        self.stream_mode = "none"  
 
     def set_socketio(self, socketio):
         self.socketio = socketio
@@ -159,12 +159,10 @@ class GenICamService:
         self.is_inferencing = False
         self.is_normal_streaming = False
 
-        # Wait for threads to finish
         for thread in [self.capture_thread, self.infer_thread, self.normal_thread]:
             if thread and thread.is_alive():
                 thread.join(timeout=2.0)
 
-        # Clean up camera
         if self.ia:
             try:
                 self.ia.stop()
@@ -180,7 +178,6 @@ class GenICamService:
                 print(f"Error resetting harvester: {e}")
             self.h = None
 
-        # Clean up CUDA
         if self.ctx:
             try:
                 self.ctx.pop()
@@ -204,20 +201,20 @@ class GenICamService:
                         frame_rgb = self._process_frame(buffer)
                         frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-                        # Resize for display
+                        
                         h, w = frame_bgr.shape[:2]
                         scale = min(640 / h, 640 / w)
                         nw, nh = int(round(w * scale)), int(round(h * scale))
                         resized = cv2.resize(frame_bgr, (nw, nh))
 
-                        # Calculate FPS
+                        
                         now = time.perf_counter()
                         self.done_timestamps.append(now)
                         while self.done_timestamps and (now - self.done_timestamps[0] > 1.0):
                             self.done_timestamps.popleft()
                         fps = float(len(self.done_timestamps))
 
-                        # Encode frame
+                      
                         ok, jpeg = cv2.imencode(".jpg", resized)
                         if not ok:
                             continue
@@ -232,11 +229,11 @@ class GenICamService:
                             }
                         }
 
-                        # Emit frame
+                    
                         if self.socketio and self.client_count > 0:
                             try:
                                 self.socketio.emit("stream_frame", payload, to="stream", namespace="/ws")
-                                if frame_count % 30 == 0:  # Log every 30 frames
+                                if frame_count % 30 == 0:  
                                     print(f"Emitted normal frame {frame_count} to {self.client_count} clients")
                             except Exception as e:
                                 print(f"Error emitting normal frame: {e}")
@@ -261,7 +258,7 @@ class GenICamService:
                         frame_rgb = self._process_frame(buffer)
                         frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-                        # Letterbox to 640x640 for inference
+                       
                         h, w = frame_bgr.shape[:2]
                         scale = min(640 / h, 640 / w)
                         nw, nh = int(round(w * scale)), int(round(h * scale))
@@ -301,14 +298,14 @@ class GenICamService:
                 except queue.Empty:
                     continue
 
-                # Calculate camera FPS
+             
                 cam_fps = 0.0
                 if last_cap_ts is not None:
                     dt = max(1e-9, (cap_ts - last_cap_ts))
                     cam_fps = 1.0 / dt
                 last_cap_ts = cap_ts
 
-                # Run inference
+               
                 infer_ms = 0
                 detections = []
                 if self.detector:
@@ -316,23 +313,23 @@ class GenICamService:
                     detections = self.detector.detect_raw_frame(canvas, score_threshold=self.conf_threshold)
                     infer_ms = (time.perf_counter() - t0) * 1e3
 
-                # Draw detections
+                
                 vis = self.visualize_detections_img(canvas, detections)
 
-                # Compute display FPS
+                
                 now = time.perf_counter()
                 done.append(now)
                 while done and (now - done[0] > 1.0):
                     done.popleft()
                 disp_fps = float(len(done))
 
-                # Encode JPEG
+             
                 ok, jpeg = cv2.imencode(".jpg", vis)
                 if not ok:
                     continue
                 b64 = base64.b64encode(jpeg.tobytes()).decode("utf-8")
 
-                # Prepare payload
+             
                 det_json = [
                     {"bbox": det.bbox, "label": int(det.label_id), "score": float(det.score)}
                     for det in detections
@@ -349,11 +346,11 @@ class GenICamService:
                     }
                 }
 
-                # Emit frame
+               
                 if self.socketio and self.client_count > 0:
                     try:
                         self.socketio.emit("inference_result", payload, to="stream", namespace="/ws")
-                        if frame_count % 30 == 0:  # Log every 30 frames
+                        if frame_count % 30 == 0: 
                             print(f"Emitted inference frame {frame_count} - {len(detections)} detections")
                     except Exception as e:
                         print(f"Error emitting inference frame: {e}")
@@ -417,7 +414,7 @@ class GenICamService:
         with self.clients_lock:
             self.client_count += 1
             print(f"Client joined - total: {self.client_count}")
-            # Don't auto-start here - let explicit API calls handle it
+         
         return self.client_count
 
     def client_left(self):
