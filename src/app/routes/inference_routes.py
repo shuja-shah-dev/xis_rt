@@ -1,75 +1,93 @@
-from flask import Blueprint, jsonify
-from app.core.config import AppConfig
-from app.core.genicam_service import GenICamService
+import cv2
+import base64
+import threading
+import time
+from flask_socketio import emit
 
-inference_bp = Blueprint("inference", __name__)
-app_config = AppConfig()
-genicam_service = GenICamService()
-
-def run_video_inference(config):
-    return f"Running video inference with model {config['model_selection']} on video {config['video_path']}"
-
-@inference_bp.route("/stream/normal", methods=["POST"])
-def start_normal_stream():
-    is_valid, message = app_config.validate_config()
-    if not is_valid:
-        return jsonify({"status": "error", "message": message})
-
-    config = app_config.get_config()
-
-    if config["input_type"] == "camera":
-        genicam_service.run_normal()
-        result = "Normal camera stream started"
-    else:
-        result = "Normal stream only available for camera input"
-
-    return jsonify({"status": "success", "result": result})
-
-@inference_bp.route("/stream/inference", methods=["POST"])
-def start_inference_stream():
-    is_valid, message = app_config.validate_config()
-    if not is_valid:
-        return jsonify({"status": "error", "message": message})
-
-    config = app_config.get_config()
-
-    if config["input_type"] == "camera":
-        if config["model_selection"]:
-            engine_path = f"models/{config['model_selection']}.engine"
-            genicam_service.run_with_inference(engine_path)
-            result = f"Inference stream started with model {config['model_selection']}"
-        else:
-            result = "No model selected for inference"
-    else:
-        result = run_video_inference(config)
-
-    return jsonify({"status": "success", "result": result})
-
-@inference_bp.route("/stream/stop", methods=["POST"])
-def stop_stream():
-    genicam_service.stop()
-    return jsonify({"status": "success", "result": "Stream stopped"})
-
-def register_socketio_events(socketio, genicam_service):
-    @socketio.on("connect")
-    def on_connect():
-        from flask_socketio import join_room, emit
-        join_room("stream")
-        clients = genicam_service.client_joined()
-        emit("status", {"message": "Connected", "clients": clients})
-
-    @socketio.on("disconnect")
-    def on_disconnect():
-        from flask_socketio import leave_room
-        leave_room("stream")
-        clients = genicam_service.client_left()
-
-    @socketio.on("set_confidence")
-    def on_set_confidence(data):
-        from flask_socketio import emit
-        try:
-            value = float(data.get("value", genicam_service.conf_threshold))
-            new_val = genicam_service.set_confidence(value)
-            emit("status", {"message": "confidence_updated", "value": new_val}, to="stream")
-        except Exception as e:
-            emit("status", {"message": f"error: {e}"})
+class GenICamService:
+    def __init__(self):
+        self.socketio = None
+        self.streaming = False
+        self.stream_thread = None
+        self.conf_threshold = 0.5
+        self.client_count = 0
+        
+    def set_socketio(self, socketio):
+        self.socketio = socketio
+        
+    def client_joined(self):
+        self.client_count += 1
+        return self.client_count
+        
+    def client_left(self):
+        self.client_count -= 1
+        return self.client_count
+        
+    def set_confidence(self, value):
+        self.conf_threshold = value
+        return self.conf_threshold
+    
+    def run_normal(self):
+        if not self.streaming:
+            self.streaming = True
+            self.stream_thread = threading.Thread(target=self._stream_normal_frames)
+            self.stream_thread.daemon = True
+            self.stream_thread.start()
+    
+    def run_with_inference(self, engine_path):
+        if not self.streaming:
+            self.streaming = True
+            self.stream_thread = threading.Thread(target=self._stream_inference_frames, args=(engine_path,))
+            self.stream_thread.daemon = True
+            self.stream_thread.start()
+    
+    def stop(self):
+        self.streaming = False
+        if self.stream_thread:
+            self.stream_thread.join(timeout=1)
+    
+    def _stream_normal_frames(self):
+        cap = cv2.VideoCapture(0)  # Use your camera source here
+        
+        while self.streaming and cap.isOpened():
+            ret, frame = cap.read()
+            if ret:
+                _, buffer = cv2.imencode('.jpg', frame)
+                frame_b64 = base64.b64encode(buffer).decode('utf-8')
+                
+                if self.socketio:
+                    self.socketio.emit('stream_frame', {
+                        'frame': frame_b64,
+                        'metrics': {'display_fps': 30}
+                    }, room='stream')
+                
+                time.sleep(1/30)  # 30 FPS
+        
+        cap.release()
+    
+    def _stream_inference_frames(self, engine_path):
+        cap = cv2.VideoCapture(0)  # Use your camera source here
+        
+        while self.streaming and cap.isOpened():
+            ret, frame = cap.read()
+            if ret:
+                # Add your inference logic here
+                processed_frame = self._run_inference(frame, engine_path)
+                
+                _, buffer = cv2.imencode('.jpg', processed_frame)
+                frame_b64 = base64.b64encode(buffer).decode('utf-8')
+                
+                if self.socketio:
+                    self.socketio.emit('inference_result', {
+                        'frame': frame_b64,
+                        'detections': []  # Add detection results
+                    }, room='stream')
+                
+                time.sleep(1/30)  # 30 FPS
+        
+        cap.release()
+    
+    def _run_inference(self, frame, engine_path):
+        # Add your actual inference logic here
+        # For now, just return the original frame
+        return frame
