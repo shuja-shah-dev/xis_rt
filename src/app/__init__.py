@@ -1,10 +1,13 @@
 from flask import Flask, jsonify
 from flask_cors import CORS
+from flask_socketio import SocketIO
 from config.settings import settings
 from app.core.mqtt_client import init_mqtt, mqtt
 from app.routes.mqtt_routes import mqtt_bp
 from app.routes.camera_routes import camera_bp
 from app.routes.model_routes import model_bp
+
+
 
 __PREFIX__ = "/api"
 
