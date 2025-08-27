@@ -6,7 +6,7 @@ import VideoUploader from "../components/CameraComponents/VideoUploader"; // <--
 
 const Camera = ({ setActiveScreen }) => {
   const [step, setStep] = useState(1);
-  const [cameraType, setCameraType] = useState(null); // store selected
+  const [cameraType, setCameraType] = useState({ id: null, name: "" });
 
   return (
     <div>
@@ -30,12 +30,16 @@ const Camera = ({ setActiveScreen }) => {
                 >
                   {num}
                 </div>
-                <p className={`text-sm mt-2 ${step === num ? "" : "text-[#9A9A9A]"}`}>
+                <p
+                  className={`text-sm mt-2 ${
+                    step === num ? "" : "text-[#9A9A9A]"
+                  }`}
+                >
                   {num === 1
                     ? "Camera Selection"
                     : num === 2
                     ? cameraType === "video"
-                      ? "Upload Video"
+                      ? "Select Video"
                       : "Upload CTI File"
                     : "Preview"}
                 </p>
@@ -50,18 +54,25 @@ const Camera = ({ setActiveScreen }) => {
       <div className="mt-12">
         {step === 1 && (
           <CameraSelector
-            onNext={(selected) => {
-              setCameraType(selected);
+            onNext={(id, name) => {
+              setCameraType({ id, name }); // store both
               setStep(2);
             }}
           />
         )}
 
         {step === 2 &&
-          (cameraType === "video" ? (
-            <VideoUploader onNext={() => setStep(3)} onBack={() => setStep(1)} />
+          (cameraType.id === "video" ? (
+            <VideoUploader
+              onNext={() => setStep(3)}
+              onBack={() => setStep(1)}
+            />
           ) : (
-            <CTIUploader onNext={() => setStep(3)} onBack={() => setStep(1)} />
+            <CTIUploader
+              cameraName={cameraType.name} // <-- pass here
+              onNext={() => setStep(3)}
+              onBack={() => setStep(1)}
+            />
           ))}
 
         {step === 3 && (

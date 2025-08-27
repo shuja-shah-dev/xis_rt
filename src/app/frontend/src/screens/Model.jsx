@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import RoundedButton from "../components/RoundedButton";
 
-const Model = () => {
+const Model = ({ setActiveScreen }) => {
   const [selected, setSelected] = useState(null);
 
   const categories = [
@@ -10,18 +10,12 @@ const Model = () => {
       models: [{ id: "general", name: "General Model" }],
     },
     {
-      name: "Baguette",
-      models: [
-        { id: "Baguette-twin", name: "Digital Twin Model" },
-        { id: "Baguette-real", name: "Real Data Model" },
-      ],
+      name: "Baked Baguette",
+      models: [{ id: "Baguette-twin", name: "Digital Twin Model" }],
     },
     {
-      name: "Raw",
-      models: [
-        { id: "raw-twin", name: "Digital Twin Model" },
-        { id: "raw-real", name: "Real Data Model" },
-      ],
+      name: "Raw Dough",
+      models: [{ id: "raw-twin", name: "Digital Twin Model" }],
     },
   ];
 
@@ -46,7 +40,6 @@ const Model = () => {
             <div className="flex gap-10 flex-wrap">
               {category.models.map((model) => {
                 const isSelected = selected === model.id;
-                // const status = isSelected ? "Selected" : "Not Selected";
 
                 return (
                   <div
@@ -75,15 +68,6 @@ const Model = () => {
                             />
                           </div>
                         )}
-                        {/* <div
-                          className={`text-[10px] font-semibold rounded-4xl py-1 px-5 ${
-                            status === "Selected"
-                              ? "bg-[#1AA64B]"
-                              : "bg-[#FF4C40]"
-                          }`}
-                        >
-                          {status}
-                        </div> */}
                       </div>
                     </div>
 
@@ -104,6 +88,7 @@ const Model = () => {
         ))}
       </div>
 
+      {/* Raw Dough Category */}
       <div
         key={categories[2].name}
         className="relative flex flex-col gap-8 border-2 rounded-[12px] border-[#0E2332] bg-[rgba(255,255,255,0.05)] backdrop-blur-[28.55px] py-5 px-8 mt-6 w-full"
@@ -113,7 +98,6 @@ const Model = () => {
         <div className="flex gap-10 flex-wrap">
           {categories[2].models.map((model) => {
             const isSelected = selected === model.id;
-            // const status = isSelected ? "Selected" : "Not Selected";
 
             return (
               <div
@@ -142,15 +126,6 @@ const Model = () => {
                         />
                       </div>
                     )}
-                    {/* <div
-                      className={`text-[10px] font-semibold rounded-4xl py-1 px-5 ${
-                        status === "Selected"
-                          ? "bg-[#1AA64B]"
-                          : "bg-[#FF4C40]"
-                      }`}
-                    >
-                      {status}
-                    </div> */}
                   </div>
                 </div>
 
@@ -167,6 +142,17 @@ const Model = () => {
             );
           })}
         </div>
+      </div>
+
+      {/* Next Button */}
+      <div className="mt-6 flex justify-end">
+        <button
+          disabled={!selected}
+          onClick={() => setActiveScreen("Inference")}
+          className="px-5 py-2 rounded-xl bg-[#1272E5] text-white text-md cursor-pointer disabled:opacity-50"
+        >
+          Next
+        </button>
       </div>
     </div>
   );
