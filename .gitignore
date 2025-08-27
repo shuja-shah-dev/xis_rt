@@ -1,2 +1,6 @@
 venv
 node_modules
+mosquitto/
+*.pyc
+__pycache__
+pycache

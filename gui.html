@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQTT Dashboard</title>
     <style>
+        /* Your existing CSS remains the same */
         * {
             margin: 0;
             padding: 0;
@@ -378,7 +379,7 @@
     </div>
 
     <script>
-        const API_BASE = 'http://localhost:8000/api/v1';
+        const API_BASE = 'http://localhost:8000/api/v1/mqtt';
         let autoRefreshEnabled = true;
         let refreshInterval;
         let messageCount = 0;
@@ -407,7 +408,7 @@
 
         async function checkMQTTStatus() {
             try {
-                const response = await fetchWithTimeout(`${API_BASE}/mqtt/status`);
+                const response = await fetchWithTimeout(`${API_BASE}/status`);
                 const data = await response.json();
                 
                 const statusDot = document.getElementById('connectionStatus');
@@ -417,7 +418,7 @@
                 if (data.connected) {
                     statusDot.classList.add('connected');
                     statusText.textContent = 'Connected';
-                    brokerInfo.textContent = `${data.broker}:${data.port}`;
+                    brokerInfo.textContent = `${data.broker_host}:${data.broker_port}`;
                 } else {
                     statusDot.classList.remove('connected');
                     statusText.textContent = 'Disconnected';
@@ -433,7 +434,10 @@
 
         async function fetchMessages() {
             try {
-                const response = await fetchWithTimeout(`${API_BASE}/mqtt/messages`);
+                const response = await fetchWithTimeout(`${API_BASE}/messages`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 const messages = await response.json();
                 
                 displayMessages(messages);
@@ -445,7 +449,7 @@
                 document.getElementById('messagesContainer').innerHTML = `
                     <div class="message-item" style="border-left-color: #dc3545;">
                         <div class="message-topic">Connection Error</div>
-                        <div class="message-payload">Failed to fetch messages from API</div>
+                        <div class="message-payload">Failed to fetch messages: ${error.message}</div>
                     </div>
                 `;
             }
@@ -454,7 +458,7 @@
         function displayMessages(messages) {
             const container = document.getElementById('messagesContainer');
             
-            if (messages.length === 0) {
+            if (!messages || messages.length === 0) {
                 container.innerHTML = `
                     <div class="message-item">
                         <div class="message-topic">No messages received yet</div>
@@ -465,7 +469,7 @@
             }
 
             container.innerHTML = messages.slice(-10).reverse().map(msg => {
-                const time = new Date(msg.timestamp).toLocaleTimeString();
+                const time = new Date(msg.timestamp || Date.now()).toLocaleTimeString();
                 let payload = msg.payload;
                 
                 try {
@@ -477,9 +481,9 @@
                 
                 return `
                     <div class="message-item">
-                        <div class="message-topic">${msg.topic}</div>
+                        <div class="message-topic">${msg.topic || 'unknown'}</div>
                         <div class="message-payload">${payload}</div>
-                        <div class="message-time">${time} | QoS: ${msg.qos}</div>
+                        <div class="message-time">${time} | QoS: ${msg.qos || 0}</div>
                     </div>
                 `;
             }).join('');
@@ -490,63 +494,94 @@
             const humidityContainer = document.getElementById('humiditySensors');
             const statusContainer = document.getElementById('deviceStatus');
             
-            // Process sensor data
-            const sensors = {};
+            // Clear previous data but keep default if no new data
+            let hasTempData = false;
+            let hasHumidityData = false;
+            let hasDeviceData = false;
+            
+            const tempSensors = {};
+            const humiditySensors = {};
             const devices = {};
             
             messages.forEach(msg => {
                 try {
-                    const data = JSON.parse(msg.payload);
+                    let data;
+                    // Try to parse JSON payload
+                    try {
+                        data = JSON.parse(msg.payload);
+                    } catch (e) {
+                        // If not JSON, skip processing
+                        return;
+                    }
                     
-                    if (msg.topic.includes('/data') && data.sensor_id) {
-                        sensors[data.sensor_id] = {
-                            temperature: data.temperature,
-                            humidity: data.humidity,
-                            battery: data.battery_level,
-                            status: data.status,
+                    const topic = msg.topic || '';
+                    
+                    // Extract sensor data from various possible formats
+                    if (topic.includes('temperature') || data.temperature !== undefined) {
+                        const sensorId = data.sensor_id || data.device_id || topic.split('/').pop() || 'unknown';
+                        tempSensors[sensorId] = {
+                            value: data.temperature,
+                            unit: data.unit || '°C',
                             timestamp: msg.timestamp
                         };
+                        hasTempData = true;
                     }
                     
-                    if (msg.topic.includes('/status') && data.device_id) {
-                        devices[data.device_id] = {
-                            status: data.status,
-                            cpu: data.cpu_usage,
-                            memory: data.memory_usage,
-                            uptime: data.uptime
+                    if (topic.includes('humidity') || data.humidity !== undefined) {
+                        const sensorId = data.sensor_id || data.device_id || topic.split('/').pop() || 'unknown';
+                        humiditySensors[sensorId] = {
+                            value: data.humidity,
+                            unit: data.unit || '%',
+                            timestamp: msg.timestamp
                         };
+                        hasHumidityData = true;
                     }
+                    
+                    if (topic.includes('status') || data.status !== undefined) {
+                        const deviceId = data.device_id || data.sensor_id || topic.split('/').pop() || 'unknown';
+                        devices[deviceId] = {
+                            status: data.status,
+                            battery: data.battery_level || data.battery,
+                            uptime: data.uptime,
+                            timestamp: msg.timestamp
+                        };
+                        hasDeviceData = true;
+                    }
+                    
                 } catch (e) {
-                    // Skip non-JSON messages
+                    console.log('Error processing message:', e);
                 }
             });
             
             // Update temperature display
-            if (Object.keys(sensors).length > 0) {
-                tempContainer.innerHTML = Object.entries(sensors).map(([id, data]) => `
+            if (hasTempData) {
+                tempContainer.innerHTML = Object.entries(tempSensors).map(([id, data]) => `
                     <div class="sensor-value">
                         <span class="sensor-label">${id}</span>
-                        <span class="sensor-data">${data.temperature}°C</span>
+                        <span class="sensor-data">${data.value}${data.unit}</span>
                     </div>
                 `).join('');
             }
             
             // Update humidity display
-            if (Object.keys(sensors).length > 0) {
-                humidityContainer.innerHTML = Object.entries(sensors).map(([id, data]) => `
+            if (hasHumidityData) {
+                humidityContainer.innerHTML = Object.entries(humiditySensors).map(([id, data]) => `
                     <div class="sensor-value">
                         <span class="sensor-label">${id}</span>
-                        <span class="sensor-data">${data.humidity}%</span>
+                        <span class="sensor-data">${data.value}${data.unit}</span>
                     </div>
                 `).join('');
             }
             
             // Update device status
-            if (Object.keys(devices).length > 0) {
+            if (hasDeviceData) {
                 statusContainer.innerHTML = Object.entries(devices).map(([id, data]) => `
                     <div class="sensor-value">
                         <span class="sensor-label">${id}</span>
-                        <span class="sensor-data" style="color: ${data.status === 'online' ? '#28a745' : '#dc3545'}">${data.status}</span>
+                        <span class="sensor-data" style="color: ${data.status === 'online' ? '#28a745' : '#dc3545'}">
+                            ${data.status || 'unknown'}
+                            ${data.battery ? ` | 🔋 ${data.battery}%` : ''}
+                        </span>
                     </div>
                 `).join('');
             }
@@ -557,15 +592,18 @@
             document.getElementById('messageCount').textContent = messageCount;
             document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
             
-
+            // Calculate messages per minute
             const now = Date.now();
             lastMinuteMessages = lastMinuteMessages.filter(time => now - time < 60000);
             lastMinuteMessages.push(now);
             messagesPerMinute = lastMinuteMessages.length;
             document.getElementById('messagesPerMin').textContent = messagesPerMinute;
             
-
-            const topics = new Set(messages.map(msg => msg.topic));
+            // Count unique topics
+            const topics = new Set();
+            messages.forEach(msg => {
+                if (msg.topic) topics.add(msg.topic);
+            });
             document.getElementById('activeTopics').textContent = topics.size;
         }
 
@@ -580,7 +618,7 @@
             }
             
             try {
-                const response = await fetch(`${API_BASE}/mqtt/publish`, {
+                const response = await fetch(`${API_BASE}/publish`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -592,15 +630,14 @@
                     })
                 });
                 
-                const result = await response.json();
-                
-                if (response.ok) {
-                    alert('Message published successfully!');
-                    // Clear the form
-                    document.getElementById('payload').value = '';
-                } else {
-                    alert(`Failed to publish: ${result.detail}`);
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to publish message');
                 }
+                
+                const result = await response.json();
+                alert('Message published successfully!');
+                
             } catch (error) {
                 alert(`Error: ${error.message}`);
             }
@@ -617,11 +654,12 @@
         }
 
         function startAutoRefresh() {
-            refreshInterval = setInterval(refreshData, 2000); // Refresh every 2 seconds
+            refreshInterval = setInterval(refreshData, 2000);
         }
 
         async function refreshData() {
-            await Promise.all([checkMQTTStatus(), fetchMessages()]);
+            await checkMQTTStatus();
+            await fetchMessages();
         }
 
         // Initialize dashboard
