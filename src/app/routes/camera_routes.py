@@ -1,6 +1,8 @@
 from flask import Blueprint, request, jsonify
 import os
 from app.core.config import AppConfig
+from werkzeug.utils import secure_filename
+
 
 camera_bp = Blueprint("camera", __name__)
 app_config = AppConfig()
@@ -8,10 +10,22 @@ app_config = AppConfig()
 
 @camera_bp.route("/configure/camera", methods=["POST"])
 def configure_camera():
-    data = request.get_json()
-    cti_file_location = data.get("cti_file_location")
-    app_config.set_camera_config(cti_file_location)
-    return jsonify({"status": "success", "message": "Camera configured"})
+    if "cti_file" in request.files:
+        cti_file = request.files["cti_file"]
+        if cti_file.filename != "":
+            os.makedirs("cti", exist_ok=True)
+            cti_filename = secure_filename(cti_file.filename)
+            cti_file_location = os.path.join("cti", cti_filename)
+            cti_file.save(cti_file_location)
+            app_config.set_camera_config(cti_file_location)
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": "CTI file uploaded and camera configured",
+                    "cti_file_location": cti_file_location,
+                }
+            )
+    return jsonify({"status": "error", "message": "No valid CTI file provided"})
 
 
 @camera_bp.route("/configure/video", methods=["POST"])
