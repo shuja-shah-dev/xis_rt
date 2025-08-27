@@ -7,6 +7,9 @@ from app.routes.mqtt_routes import mqtt_bp
 from app.routes.camera_routes import camera_bp
 from app.routes.model_routes import model_bp
 import os
+from app.core.config import AppConfig
+
+app_config = AppConfig()
 
 __PREFIX__ = "/api"
 
@@ -40,6 +43,7 @@ def create_app():
     from app.core.genicam_service import GenICamService
     genicam_service = GenICamService()
     genicam_service.set_socketio(socketio)
+    genicam_service.set_app_config(app_config)
 
     from app.routes.inference_routes import inference_bp
     app.register_blueprint(inference_bp, url_prefix=__PREFIX__)
