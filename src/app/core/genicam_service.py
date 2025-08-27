@@ -38,34 +38,49 @@ class GenICamService:
         self.vendor = None
         self.capture_thread = None
         self.infer_thread = None
+        self.normal_thread = None
         self.is_capturing = False
         self.is_inferencing = False
+        self.is_normal_streaming = False
         self.done_timestamps = deque(maxlen=60)
         self.conf_threshold = 0.6
         self.client_count = 0
         self.clients_lock = threading.Lock()
         self.display_width = 1280
         self.display_height = 720
+        self.stream_mode = "none"  # "none", "normal", "inference"
 
     def set_socketio(self, socketio):
         self.socketio = socketio
+        print("SocketIO set on GenICamService")
 
     def set_engine_path(self, engine_path):
         self.engine_path = engine_path
 
     def set_app_config(self, app_config):
         self.app_config = app_config
+        print("AppConfig set on GenICamService")
 
     def _init_cuda(self):
-        cuda.init()
-        self.ctx = cuda.Device(0).make_context()
+        print("Initializing CUDA...")
+        try:
+            cuda.init()
+            self.ctx = cuda.Device(0).make_context()
+            print("CUDA initialized successfully")
+        except Exception as e:
+            print(f"CUDA initialization failed: {e}")
+            raise
 
     def _init_camera(self):
+        print("Initializing camera...")
         if not self.app_config:
-            raise RuntimeError("AppConfig not set")
+            raise RuntimeError("AppConfig not set - call set_app_config() first")
             
         config = self.app_config.get_config()
         cti_path = config.get('cti_file_location')
+        
+        if not cti_path:
+            raise RuntimeError("CTI file location not configured")
         
         if not os.path.exists(cti_path):
             raise RuntimeError(f"CTI not found: {cti_path}")
@@ -101,17 +116,23 @@ class GenICamService:
         if not selected:
             selected = node_map.PixelFormat.value
         self.pixel_format = selected
+        print(f"Camera initialized - Pixel format: {self.pixel_format}")
 
     def _init_tensorrt(self):
+        print(f"Initializing TensorRT with engine: {self.engine_path}")
         if not os.path.exists(self.engine_path):
             raise RuntimeError(f"Engine not found: {self.engine_path}")
 
         self.detector = TensorRTDetector(self.engine_path, max_detections=1000)
+        print("TensorRT initialized successfully")
 
-    def start(self):
+    def start_inference(self):
         if self.is_capturing or self.is_inferencing:
-            return
+            print("Already running - stopping first")
+            self.stop()
         
+        print("Starting inference mode...")
+        self.stream_mode = "inference"
         self.is_inferencing = True
         self.infer_thread = threading.Thread(target=self._inference_loop, daemon=True)
         self.infer_thread.start()
@@ -120,45 +141,118 @@ class GenICamService:
         self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.capture_thread.start()
 
-    def stop(self):
-        if not self.is_capturing and not self.is_inferencing:
-            return
+    def start_normal(self):
+        if self.is_capturing or self.is_normal_streaming:
+            print("Already running - stopping first")
+            self.stop()
+            
+        print("Starting normal streaming mode...")
+        self.stream_mode = "normal"
+        self.is_normal_streaming = True
+        self.normal_thread = threading.Thread(target=self._normal_stream_loop, daemon=True)
+        self.normal_thread.start()
 
+    def stop(self):
+        print("Stopping GenICam service...")
+        self.stream_mode = "none"
         self.is_capturing = False
         self.is_inferencing = False
+        self.is_normal_streaming = False
 
-        if self.capture_thread and self.capture_thread.is_alive():
-            self.capture_thread.join(timeout=2.0)
-        if self.infer_thread and self.infer_thread.is_alive():
-            self.infer_thread.join(timeout=2.0)
+        # Wait for threads to finish
+        for thread in [self.capture_thread, self.infer_thread, self.normal_thread]:
+            if thread and thread.is_alive():
+                thread.join(timeout=2.0)
 
+        # Clean up camera
         if self.ia:
             try:
                 self.ia.stop()
                 self.ia.destroy()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error stopping camera: {e}")
             self.ia = None
 
         if self.h:
             try:
                 self.h.reset()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error resetting harvester: {e}")
             self.h = None
 
+        # Clean up CUDA
         if self.ctx:
             try:
                 self.ctx.pop()
-            except Exception:
-                pass
-            try:
                 self.ctx.detach()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error cleaning up CUDA: {e}")
             self.ctx = None
+        
+        print("GenICam service stopped")
+
+    def _normal_stream_loop(self):
+        """Stream raw camera frames without inference"""
+        print("Starting normal stream loop...")
+        try:
+            self.ia.start()
+            frame_count = 0
+            
+            while self.is_normal_streaming:
+                try:
+                    with self.ia.fetch(timeout=2000) as buffer:
+                        frame_rgb = self._process_frame(buffer)
+                        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+
+                        # Resize for display
+                        h, w = frame_bgr.shape[:2]
+                        scale = min(640 / h, 640 / w)
+                        nw, nh = int(round(w * scale)), int(round(h * scale))
+                        resized = cv2.resize(frame_bgr, (nw, nh))
+
+                        # Calculate FPS
+                        now = time.perf_counter()
+                        self.done_timestamps.append(now)
+                        while self.done_timestamps and (now - self.done_timestamps[0] > 1.0):
+                            self.done_timestamps.popleft()
+                        fps = float(len(self.done_timestamps))
+
+                        # Encode frame
+                        ok, jpeg = cv2.imencode(".jpg", resized)
+                        if not ok:
+                            continue
+                        b64 = base64.b64encode(jpeg.tobytes()).decode("utf-8")
+
+                        payload = {
+                            "frame": b64,
+                            "metrics": {
+                                "camera_fps": fps,
+                                "display_fps": fps,
+                                "conf_threshold": self.conf_threshold
+                            }
+                        }
+
+                        # Emit frame
+                        if self.socketio and self.client_count > 0:
+                            try:
+                                self.socketio.emit("stream_frame", payload, to="stream", namespace="/ws")
+                                if frame_count % 30 == 0:  # Log every 30 frames
+                                    print(f"Emitted normal frame {frame_count} to {self.client_count} clients")
+                            except Exception as e:
+                                print(f"Error emitting normal frame: {e}")
+
+                        frame_count += 1
+
+                except Exception as e:
+                    if self.is_normal_streaming:
+                        print(f"Normal stream frame error: {e}")
+                        time.sleep(0.01)
+
+        except Exception as e:
+            print(f"Normal stream loop error: {e}")
 
     def _capture_loop(self):
+        print("Starting capture loop for inference...")
         try:
             self.ia.start()
             while self.is_capturing:
@@ -183,19 +277,22 @@ class GenICamService:
 
                 except Exception as e:
                     if self.is_capturing:
+                        print(f"Capture error: {e}")
                         time.sleep(0.01)
 
         except Exception as e:
             print(f"Capture loop error: {e}")
 
     def _inference_loop(self):
+        print("Starting inference loop...")
         if self.detector is None or self.ctx is None:
+            print("ERROR: Detector or CUDA context not initialized")
             return
 
         self.ctx.push()
-
         done = deque()
         last_cap_ts = None
+        frame_count = 0
         
         try:
             while self.is_inferencing:
@@ -204,14 +301,14 @@ class GenICamService:
                 except queue.Empty:
                     continue
 
-                
+                # Calculate camera FPS
                 cam_fps = 0.0
                 if last_cap_ts is not None:
                     dt = max(1e-9, (cap_ts - last_cap_ts))
                     cam_fps = 1.0 / dt
                 last_cap_ts = cap_ts
 
-                
+                # Run inference
                 infer_ms = 0
                 detections = []
                 if self.detector:
@@ -252,24 +349,25 @@ class GenICamService:
                     }
                 }
 
-                # EMIT THE FRAME - THIS IS THE CRITICAL PART
-                if self.socketio:
+                # Emit frame
+                if self.socketio and self.client_count > 0:
                     try:
-                        print(f"Emitting frame to {self.client_count} clients")
-                        self.socketio.emit("stream_frame", payload, namespace="/ws")
+                        self.socketio.emit("inference_result", payload, to="stream", namespace="/ws")
+                        if frame_count % 30 == 0:  # Log every 30 frames
+                            print(f"Emitted inference frame {frame_count} - {len(detections)} detections")
                     except Exception as e:
-                        print(f"Error emitting frame: {e}")
+                        print(f"Error emitting inference frame: {e}")
 
+                frame_count += 1
                 self.infer_q.task_done()
-
 
         except Exception as e:
             print(f"Inference loop error: {e}")
         finally:
             try:
                 self.ctx.pop()
-            except:
-                pass
+            except Exception as e:
+                print(f"Error popping CUDA context: {e}")
 
     def _process_frame(self, buffer) -> np.ndarray:
         c = buffer.payload.components[0]
@@ -318,29 +416,42 @@ class GenICamService:
     def client_joined(self):
         with self.clients_lock:
             self.client_count += 1
-            if self.client_count == 1:
-                self.start()
+            print(f"Client joined - total: {self.client_count}")
+            # Don't auto-start here - let explicit API calls handle it
         return self.client_count
 
     def client_left(self):
         with self.clients_lock:
             self.client_count = max(0, self.client_count - 1)
+            print(f"Client left - total: {self.client_count}")
             if self.client_count == 0:
+                print("No clients left - stopping stream")
                 self.stop()
         return self.client_count
 
     def set_confidence(self, value: float):
         self.conf_threshold = float(max(0.05, min(0.99, value)))
+        print(f"Confidence threshold set to: {self.conf_threshold}")
         return self.conf_threshold
 
     def run_with_inference(self, engine_path):
-        self.set_engine_path(engine_path)
-        self._init_cuda()
-        self._init_camera()
-        self._init_tensorrt()
-        self.start()
+        print(f"Starting inference stream with engine: {engine_path}")
+        try:
+            self.set_engine_path(engine_path)
+            self._init_cuda()
+            self._init_camera()
+            self._init_tensorrt()
+            self.start_inference()
+        except Exception as e:
+            print(f"Error starting inference: {e}")
+            raise
 
     def run_normal(self):
-        self._init_cuda()
-        self._init_camera()
-        self.start()
+        print("Starting normal stream")
+        try:
+            self._init_cuda()
+            self._init_camera()
+            self.start_normal()
+        except Exception as e:
+            print(f"Error starting normal stream: {e}")
+            raise
