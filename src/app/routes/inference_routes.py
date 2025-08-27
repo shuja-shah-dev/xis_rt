@@ -13,19 +13,26 @@ def run_video_inference(engine_path):
 
 @inference_bp.route("/stream/", methods=["POST"])
 def start_normal_stream():
-    is_valid, message = app_config.validate_config()
-    if not is_valid:
-        return jsonify({"status": "error", "message": message})
+    try:
+        is_valid, message = app_config.validate_config()
+        if not is_valid:
+            return jsonify({"status": "error", "message": message}), 400
 
-    config = app_config.get_config()
+        config = app_config.get_config()
 
-    if config["input_type"] == "camera":
-        genicam_service.run_normal()
-        result = "Normal camera stream started"
-    else:
-        result = "Normal stream only available for camera input"
+        if config["input_type"] == "camera":
+            genicam_service.run_normal()
+            result = "Normal camera stream started"
+        else:
+            result = "Normal stream only available for camera input"
 
-    return jsonify({"status": "success", "result": result})
+        return jsonify({"status": "success", "result": result})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 
 @inference_bp.route("/stream/inference", methods=["POST"])

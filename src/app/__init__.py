@@ -6,6 +6,7 @@ from app.core.mqtt_client import init_mqtt, mqtt
 from app.routes.mqtt_routes import mqtt_bp
 from app.routes.camera_routes import camera_bp
 from app.routes.model_routes import model_bp
+from app.routes.inference_routes import inference_bp
 import os
 
 
@@ -16,7 +17,8 @@ socketio = SocketIO()
 
 def create_app():
     app = Flask(__name__)
-    CORS(app)
+    # CORS(app)
+    CORS(app, resources={r"/api/*": {"origins": "*"}})
 
     app.config["MQTT_BROKER_URL"] = settings.MQTT_BROKER_URL
     app.config["MQTT_BROKER_PORT"] = settings.MQTT_BROKER_PORT
@@ -31,6 +33,8 @@ def create_app():
     app.register_blueprint(mqtt_bp, url_prefix=__PREFIX__)
     app.register_blueprint(camera_bp, url_prefix=__PREFIX__)
     app.register_blueprint(model_bp, url_prefix=__PREFIX__)
+    app.register_blueprint(inference_bp, url_prefix=__PREFIX__)
+    
 
     if not os.path.exists("uploads"):
         os.makedirs("uploads")
@@ -38,6 +42,13 @@ def create_app():
         os.makedirs("cti")
 
     socketio.init_app(app, cors_allowed_origins="*")
+    @socketio.on("connect", namespace="/ws")
+    def handle_connect():
+        print("Client connected to /ws")
+
+    @socketio.on("disconnect", namespace="/ws")
+    def handle_disconnect():
+        print("Client disconnected from /ws")
 
     from app.core.genicam_service import GenICamService
 
