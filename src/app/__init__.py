@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask
 from flask_cors import CORS
 from flask_socketio import SocketIO
 from config.settings import settings
@@ -9,15 +9,12 @@ from app.routes.model_routes import model_bp
 from app.routes.inference_routes import inference_bp
 import os
 
-
 __PREFIX__ = "/api"
-
 
 socketio = SocketIO()
 
 def create_app():
     app = Flask(__name__)
-    # CORS(app)
     CORS(app, resources={r"/api/*": {"origins": "*"}})
 
     app.config["MQTT_BROKER_URL"] = settings.MQTT_BROKER_URL
@@ -35,23 +32,14 @@ def create_app():
     app.register_blueprint(model_bp, url_prefix=__PREFIX__)
     app.register_blueprint(inference_bp, url_prefix=__PREFIX__)
     
-
     if not os.path.exists("uploads"):
         os.makedirs("uploads")
     if not os.path.exists("cti"):
         os.makedirs("cti")
 
-    socketio.init_app(app, cors_allowed_origins="*")
-    @socketio.on("connect", namespace="/ws")
-    def handle_connect():
-        print("Client connected to /ws")
-
-    @socketio.on("disconnect", namespace="/ws")
-    def handle_disconnect():
-        print("Client disconnected from /ws")
+    socketio.init_app(app, cors_allowed_origins="*", async_mode='threading')
 
     from app.core.genicam_service import GenICamService
-
     genicam_service = GenICamService()
     genicam_service.set_socketio(socketio)
 

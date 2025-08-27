@@ -11,7 +11,7 @@ genicam_service = GenICamService()
 def run_video_inference(config):
     return f"Running video inference with model {config['model_selection']} on video {config['video_path']}"
 
-@inference_bp.route("/stream/normal", methods=["POST"])
+@inference_bp.route("/stream/", methods=["POST"])
 def start_normal_stream():
     is_valid, message = app_config.validate_config()
     if not is_valid:
