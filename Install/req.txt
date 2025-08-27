@@ -13,3 +13,5 @@ harvesters
 pycuda==2022.2.2
 Flask-SocketIO==5.3.6
 Werkzeug==2.3.7
+python-socketio==5.10.0
+eventlet
