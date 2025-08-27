@@ -8,6 +8,9 @@ app_config = AppConfig()
 genicam_service = GenICamService()
 
 
+def run_video_inference(engine_path):
+    genicam_service.run_with_inference(engine_path)
+
 @inference_bp.route("/stream/", methods=["POST"])
 def start_normal_stream():
     is_valid, message = app_config.validate_config()
