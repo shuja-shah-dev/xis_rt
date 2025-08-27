@@ -6,7 +6,6 @@ from app.core.mqtt_client import init_mqtt, mqtt
 from app.routes.mqtt_routes import mqtt_bp
 from app.routes.camera_routes import camera_bp
 from app.routes.model_routes import model_bp
-from app.routes.inference_routes import inference_bp
 import os
 
 __PREFIX__ = "/api"
@@ -30,7 +29,6 @@ def create_app():
     app.register_blueprint(mqtt_bp, url_prefix=__PREFIX__)
     app.register_blueprint(camera_bp, url_prefix=__PREFIX__)
     app.register_blueprint(model_bp, url_prefix=__PREFIX__)
-    app.register_blueprint(inference_bp, url_prefix=__PREFIX__)
     
     if not os.path.exists("uploads"):
         os.makedirs("uploads")
@@ -39,9 +37,16 @@ def create_app():
 
     socketio.init_app(app, cors_allowed_origins="*", async_mode='threading')
 
+
     from app.core.genicam_service import GenICamService
     genicam_service = GenICamService()
     genicam_service.set_socketio(socketio)
+
+    from app.routes.inference_routes import inference_bp
+    app.register_blueprint(inference_bp, url_prefix=__PREFIX__)
+
+    from app.routes.inference_routes import register_socketio_events
+    register_socketio_events(socketio, genicam_service)
 
     @app.route("/health")
     def health_check():
