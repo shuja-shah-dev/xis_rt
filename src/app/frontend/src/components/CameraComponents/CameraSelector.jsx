@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import RoundedButton from "../RoundedButton";
+import { FaTrash } from "react-icons/fa";
 
 const CameraSelector = ({ onNext }) => {
   const [selected, setSelected] = useState(null);
@@ -10,6 +11,20 @@ const CameraSelector = ({ onNext }) => {
   const modalRef = useRef(null);
 
   const baseCameras = [{ id: "video", name: "Video As Webcam" }];
+
+  useEffect(() => {
+    const savedCameras = localStorage.getItem("customCameras");
+    if (savedCameras) {
+      setCustomCameras(JSON.parse(savedCameras));
+    }
+    // Load selected camera
+    const savedSelected = localStorage.getItem("selectedCamera");
+    if (savedSelected) {
+      const { id, name } = JSON.parse(savedSelected);
+      setSelected(id);
+      setSelectedCameraName(name);
+    }
+  }, []);
 
   // Close modal when clicking outside
   useEffect(() => {
@@ -30,12 +45,14 @@ const CameraSelector = ({ onNext }) => {
 
   const handleSelect = (id, name) => {
     setSelected(id);
-    setSelectedCameraName(name); // Store the camera name
+    setSelectedCameraName(name);
+    localStorage.setItem("selectedCamera", JSON.stringify({ id, name }));
   };
 
   const handleDisconnect = () => {
     setSelected(null);
-    setSelectedCameraName(""); // Clear the camera name
+    setSelectedCameraName("");
+    localStorage.removeItem("selectedCamera");
   };
 
   const handleAddCamera = () => {
@@ -44,10 +61,21 @@ const CameraSelector = ({ onNext }) => {
         id: `custom-${Date.now()}`,
         name: newCameraName,
       };
-      setCustomCameras((prev) => [...prev, newCamera]);
+      const updatedCameras = [...customCameras, newCamera];
+      setCustomCameras(updatedCameras);
+
+      // Save to localStorage
+      localStorage.setItem("customCameras", JSON.stringify(updatedCameras));
+
       setNewCameraName("");
       setIsModalOpen(false);
     }
+  };
+
+  const handleRemoveCamera = (id) => {
+    const updatedCameras = customCameras.filter((camera) => camera.id !== id);
+    setCustomCameras(updatedCameras);
+    localStorage.setItem("customCameras", JSON.stringify(updatedCameras));
   };
 
   const handleNext = () => {
@@ -119,13 +147,20 @@ const CameraSelector = ({ onNext }) => {
           return (
             <div
               key={camera.id}
-              className={`group w-[335px] h-[160px] rounded-[12px] p-5 backdrop-blur-[110px] transition 
-                ${
-                  isSelected
-                    ? "border-[#1272E5] bg-[rgba(0,0,0,0.39)] border"
-                    : "border-[#0E2332] bg-[rgba(0,0,0,0.04)] hover:border-[#1272E5] border-2"
-                }`}
+              className={`group relative w-[335px] h-[160px] rounded-[12px] p-5 backdrop-blur-[110px] transition 
+        ${
+          isSelected
+            ? "border-[#1272E5] bg-[rgba(0,0,0,0.39)] border"
+            : "border-[#0E2332] bg-[rgba(0,0,0,0.04)] hover:border-[#1272E5] border-2"
+        }`}
             >
+             <button
+  onClick={() => handleRemoveCamera(camera.id)}
+  className="absolute bottom-10 right-8 cursor-pointer text-red-500 hover:text-red-700"
+>
+  <FaTrash size={18} />
+</button>
+
               <div className="flex justify-between items-center">
                 <p className="text-lg font-medium">{camera.name}</p>
 
@@ -174,8 +209,8 @@ const CameraSelector = ({ onNext }) => {
 
       {/* Modal */}
       {isModalOpen && (
-        <div className="absolute top-4 left-[36%] bg-black/50 flex items-center justify-center z-50">
-          <div 
+        <div className="absolute top-2 left-[36%] bg-black/50 flex items-center justify-center z-50">
+          <div
             ref={modalRef}
             className="bg-black p-6 rounded-xl w-[400px] flex flex-col gap-4 border-2 border-[#0E2332]"
           >
