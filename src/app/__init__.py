@@ -14,7 +14,7 @@ socketio = SocketIO()
 
 def create_app():
     app = Flask(__name__)
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    CORS(app, resources={r"/*": {"origins": "*"}})
 
     app.config["MQTT_BROKER_URL"] = settings.MQTT_BROKER_URL
     app.config["MQTT_BROKER_PORT"] = settings.MQTT_BROKER_PORT
@@ -35,8 +35,7 @@ def create_app():
     if not os.path.exists("cti"):
         os.makedirs("cti")
 
-    socketio.init_app(app, cors_allowed_origins="*", async_mode='threading')
-
+    socketio.init_app(app, cors_allowed_origins="*")
 
     from app.core.genicam_service import GenICamService
     genicam_service = GenICamService()

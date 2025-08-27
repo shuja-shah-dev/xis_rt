@@ -50,22 +50,21 @@ def stop_stream():
     genicam_service.stop()
     return jsonify({"status": "success", "result": "Stream stopped"})
 
-# Function to register socketio events (called from __init__.py)
 def register_socketio_events(socketio, genicam_service):
-    @socketio.on("connect", namespace="/ws")
+    @socketio.on("connect")
     def on_connect():
         from flask_socketio import join_room, emit
         join_room("stream")
         clients = genicam_service.client_joined()
         emit("status", {"message": "Connected", "clients": clients})
 
-    @socketio.on("disconnect", namespace="/ws")
+    @socketio.on("disconnect")
     def on_disconnect():
         from flask_socketio import leave_room
         leave_room("stream")
         clients = genicam_service.client_left()
 
-    @socketio.on("set_confidence", namespace="/ws")
+    @socketio.on("set_confidence")
     def on_set_confidence(data):
         from flask_socketio import emit
         try:
