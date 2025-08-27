@@ -3,24 +3,59 @@ import RoundedButton from "../components/RoundedButton";
 
 const Model = ({ setActiveScreen }) => {
   const [selected, setSelected] = useState(null);
+  const [serverResponse, setServerResponse] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
 
   const categories = [
     {
       name: "Generic",
-      models: [{ id: "general", name: "General Model" }],
+      models: [{ id: "generic", name: "General Model" }],
     },
     {
       name: "Baked Baguette",
-      models: [{ id: "Baguette-twin", name: "Digital Twin Model" }],
+      models: [{ id: "baked_baguette", name: "Digital Twin Model" }],
     },
     {
       name: "Raw Dough",
-      models: [{ id: "raw-twin", name: "Digital Twin Model" }],
+      models: [{ id: "raw_dough", name: "Digital Twin Model" }],
     },
   ];
 
-  const handleSelect = (id) => setSelected(id);
-  const handleDisconnect = () => setSelected(null);
+  const handleSelect = async (id) => {
+    setLoading(true);
+    setError(null);
+    setServerResponse(null);
+
+    try {
+      const response = await fetch("http://localhost:5000/api/select_model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model_name: id }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || data.status === "error") {
+        throw new Error(data.message || "Model selection failed");
+      }
+
+      setSelected(id);
+      setServerResponse(data.message);
+    } catch (err) {
+      console.error("Model selection error:", err);
+      setError(err.message);
+      setSelected(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDisconnect = () => {
+    setSelected(null);
+    setServerResponse(null);
+    setError(null);
+  };
 
   return (
     <div>
@@ -75,9 +110,10 @@ const Model = ({ setActiveScreen }) => {
 
                     <div className="mt-6">
                       <RoundedButton
-                        label="Select"
+                        label={loading && selected === model.id ? "Selecting..." : "Select"}
                         active={isSelected}
                         onClick={() => handleSelect(model.id)}
+                        disabled={loading}
                       />
                     </div>
                   </div>
@@ -133,9 +169,10 @@ const Model = ({ setActiveScreen }) => {
 
                 <div className="mt-6">
                   <RoundedButton
-                    label="Select"
+                    label={loading && selected === model.id ? "Selecting..." : "Select"}
                     active={isSelected}
                     onClick={() => handleSelect(model.id)}
+                    disabled={loading}
                   />
                 </div>
               </div>
@@ -143,6 +180,12 @@ const Model = ({ setActiveScreen }) => {
           })}
         </div>
       </div>
+
+      {/* Response messages */}
+      {/* {serverResponse && (
+        <p className="mt-4 text-green-500 text-sm">{serverResponse}</p>
+      )}
+      {error && <p className="mt-4 text-red-500 text-sm">{error}</p>} */}
 
       {/* Next Button */}
       <div className="mt-6 flex justify-end">

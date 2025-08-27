@@ -1,8 +1,7 @@
 import React, { useState } from "react";
 import CameraSelector from "../components/CameraComponents/CameraSelector";
-import CameraPreview from "../components/CameraComponents/CameraPreview";
 import CTIUploader from "../components/CameraComponents/CTIUploader";
-import VideoUploader from "../components/CameraComponents/VideoUploader"; // <-- new
+import VideoUploader from "../components/CameraComponents/VideoUploader";
 
 const Camera = ({ setActiveScreen }) => {
   const [step, setStep] = useState(1);
@@ -18,7 +17,7 @@ const Camera = ({ setActiveScreen }) => {
       {/* progress indicator */}
       <div className="flex justify-center mt-6">
         <div className="flex items-center w-[40%]">
-          {[1, 2, 3].map((num, idx) => (
+          {[1, 2].map((num, idx) => (
             <React.Fragment key={num}>
               <div className="flex flex-col items-center flex-1">
                 <div
@@ -37,14 +36,12 @@ const Camera = ({ setActiveScreen }) => {
                 >
                   {num === 1
                     ? "Camera Selection"
-                    : num === 2
-                    ? cameraType === "video"
-                      ? "Select Video"
-                      : "Upload CTI File"
-                    : "Preview"}
+                    : cameraType.id === "video"
+                    ? "Select Video"
+                    : "Upload CTI File"}
                 </p>
               </div>
-              {idx < 2 && <div className="flex-1 h-[1px] bg-[#C1C1C1]"></div>}
+              {idx < 1 && <div className="flex-1 h-[1px] bg-[#C1C1C1]"></div>}
             </React.Fragment>
           ))}
         </div>
@@ -55,7 +52,7 @@ const Camera = ({ setActiveScreen }) => {
         {step === 1 && (
           <CameraSelector
             onNext={(id, name) => {
-              setCameraType({ id, name }); // store both
+              setCameraType({ id, name }); 
               setStep(2);
             }}
           />
@@ -64,23 +61,16 @@ const Camera = ({ setActiveScreen }) => {
         {step === 2 &&
           (cameraType.id === "video" ? (
             <VideoUploader
-              onNext={() => setStep(3)}
+              onNext={() => setActiveScreen("Model")}
               onBack={() => setStep(1)}
             />
           ) : (
             <CTIUploader
-              cameraName={cameraType.name} // <-- pass here
-              onNext={() => setStep(3)}
+              cameraName={cameraType.name}
+              onNext={() => setActiveScreen("Model")}
               onBack={() => setStep(1)}
             />
           ))}
-
-        {step === 3 && (
-          <CameraPreview
-            onNext={() => setActiveScreen("Model")}
-            onBack={() => setStep(2)}
-          />
-        )}
       </div>
     </div>
   );
