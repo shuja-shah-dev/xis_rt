@@ -7,3 +7,9 @@ pydantic-settings
 Flask
 flask-cors
 flask-mqtt
+numpy==1.24.3
+opencv-python==4.8.1.78
+harvesters
+pycuda==2022.2.2
+Flask-SocketIO==5.3.6
+Werkzeug==2.3.7

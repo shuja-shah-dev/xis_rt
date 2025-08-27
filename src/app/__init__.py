@@ -9,6 +9,8 @@ from app.routes.model_routes import model_bp
 __PREFIX__ = "/api"
 
 
+socketio = SocketIO()
+
 def create_app():
     app = Flask(__name__)
     CORS(app)
@@ -27,14 +29,17 @@ def create_app():
     app.register_blueprint(camera_bp, url_prefix=__PREFIX__)
     app.register_blueprint(model_bp, url_prefix=__PREFIX__)
 
-    @app.route("/")
-    def root():
-        return jsonify(
-            {
-                "message": "Welcome to Flask MQTT Application",
-                "endpoints": ["/mqtt/status", "/mqtt/publish_detection"],
-            }
-        )
+    if not os.path.exists("uploads"):
+        os.makedirs("uploads")
+    if not os.path.exists("cti"):
+        os.makedirs("cti")
+
+    socketio.init_app(app, cors_allowed_origins="*")
+
+    from app.core.genicam_service import GenICamService
+
+    genicam_service = GenICamService()
+    genicam_service.set_socketio(socketio)
 
     @app.route("/health")
     def health_check():
