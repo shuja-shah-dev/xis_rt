@@ -16,6 +16,7 @@ import pycuda.driver as cuda
 
 from app.core.config import AppConfig
 
+
 class GenICamService:
     _instance = None
 
@@ -61,8 +62,8 @@ class GenICamService:
 
     def _init_camera(self):
         config = self.app_config.get_config()
-        cti_path = config.get('cti_file_location')
-        
+        cti_path = config.get("cti_file_location")
+
         if not os.path.exists(cti_path):
             raise RuntimeError(f"CTI not found: {cti_path}")
 
@@ -74,7 +75,9 @@ class GenICamService:
             raise RuntimeError("No cameras found via Harvesters/GenTL")
 
         if self.camera_index >= len(self.h.device_info_list):
-            raise RuntimeError(f"Camera index {self.camera_index} not available; {len(self.h.device_info_list)} device(s) detected")
+            raise RuntimeError(
+                f"Camera index {self.camera_index} not available; {len(self.h.device_info_list)} device(s) detected"
+            )
 
         self.ia = self.h.create(self.camera_index)
         node_map = self.ia.remote_device.node_map
@@ -84,7 +87,15 @@ class GenICamService:
         node_map.Height.value = node_map.Height.max
 
         available = list(node_map.PixelFormat.symbolics)
-        priority = ["RGB8", "BGR8", "BayerRG8", "BayerGR8", "BayerBG8", "BayerGB8", "Mono8"]
+        priority = [
+            "RGB8",
+            "BGR8",
+            "BayerRG8",
+            "BayerGR8",
+            "BayerBG8",
+            "BayerGB8",
+            "Mono8",
+        ]
         selected = None
         for fmt in priority:
             if fmt in available:
@@ -103,12 +114,13 @@ class GenICamService:
             raise RuntimeError(f"Engine not found: {self.engine_path}")
 
         from geni_inference import TensorRTDetector
+
         self.detector = TensorRTDetector(self.engine_path, max_detections=1000)
 
     def start(self):
         if self.is_capturing or self.is_inferencing:
             return
-        
+
         self.is_inferencing = True
         self.infer_thread = threading.Thread(target=self._inference_loop, daemon=True)
         self.infer_thread.start()
@@ -174,7 +186,7 @@ class GenICamService:
                         resized = cv2.resize(frame_bgr, (nw, nh))
                         canvas = np.full((640, 640, 3), 114, dtype=np.uint8)
                         top, left = (640 - nh) // 2, (640 - nw) // 2
-                        canvas[top:top + nh, left:left + nw] = resized
+                        canvas[top : top + nh, left : left + nw] = resized
 
                         try:
                             self.infer_q.put_nowait((canvas, time.perf_counter()))
@@ -212,7 +224,9 @@ class GenICamService:
                 last_cap_ts = cap_ts
 
                 t0 = time.perf_counter()
-                detections = self.detector.detect_raw_frame(canvas, score_threshold=self.conf_threshold)
+                detections = self.detector.detect_raw_frame(
+                    canvas, score_threshold=self.conf_threshold
+                )
                 infer_ms = (time.perf_counter() - t0) * 1e3
 
                 t1 = time.perf_counter()
@@ -226,7 +240,11 @@ class GenICamService:
                 disp_fps = float(len(done))
 
                 det_json = [
-                    {"bbox": det.bbox, "label": int(det.label_id), "score": float(det.score)}
+                    {
+                        "bbox": det.bbox,
+                        "label": int(det.label_id),
+                        "score": float(det.score),
+                    }
                     for det in detections
                 ]
 
@@ -243,12 +261,14 @@ class GenICamService:
                         "display_fps": disp_fps,
                         "infer_ms": infer_ms,
                         "post_ms": post_ms,
-                        "conf_threshold": self.conf_threshold
-                    }
+                        "conf_threshold": self.conf_threshold,
+                    },
                 }
 
                 if self.socketio:
-                    self.socketio.emit("inference_result", payload, to="stream", namespace="/ws")
+                    self.socketio.emit(
+                        "inference_result", payload, to="stream", namespace="/ws"
+                    )
                 self.infer_q.task_done()
 
         finally:
@@ -295,7 +315,15 @@ class GenICamService:
             x1, y1, x2, y2 = det.bbox
             cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
             label = f"{det.label_id}: {det.score:.2f}"
-            cv2.putText(img, label, (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            cv2.putText(
+                img,
+                label,
+                (int(x1), int(y1) - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                2,
+            )
         return img
 
     def client_joined(self):
@@ -323,9 +351,63 @@ class GenICamService:
         self._init_tensorrt()
         self.start()
 
+    def _normal_capture_loop(self):
+        try:
+            self.ia.start()
+            frame_count = 0
+            while self.is_capturing:
+                try:
+                    with self.ia.fetch(timeout=2000) as buffer:
+                        frame_rgb = self._process_frame(buffer)
+                        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+
+                        h, w = frame_bgr.shape[:2]
+                        scale = min(640 / h, 640 / w)
+                        nw, nh = int(round(w * scale)), int(round(h * scale))
+                        resized = cv2.resize(frame_bgr, (nw, nh))
+
+                        now = time.perf_counter()
+                        self.done_timestamps.append(now)
+                        while self.done_timestamps and (
+                            now - self.done_timestamps[0] > 1.0
+                        ):
+                            self.done_timestamps.popleft()
+                        fps = float(len(self.done_timestamps))
+
+                        ok, jpeg = cv2.imencode(".jpg", resized)
+                        if not ok:
+                            continue
+                        b64 = base64.b64encode(jpeg.tobytes()).decode("utf-8")
+
+                        payload = {
+                            "frame": b64,
+                            "metrics": {
+                                "camera_fps": fps,
+                                "display_fps": fps,
+                                "conf_threshold": self.conf_threshold,
+                            },
+                        }
+
+                        if self.socketio:
+                            self.socketio.emit(
+                                "stream_frame", payload, to="stream", namespace="/ws"
+                            )
+
+                        frame_count += 1
+
+                except Exception as e:
+                    if self.is_capturing:
+                        time.sleep(0.01)
+
+        except Exception as e:
+            pass
+
     def run_normal(self):
-        config = self.app_config.get_config()
-        cti_path = config.get('cti_file_location')
         self._init_cuda()
         self._init_camera()
-        self.start()
+
+        self.is_capturing = True
+        self.capture_thread = threading.Thread(
+            target=self._normal_capture_loop, daemon=True
+        )
+        self.capture_thread.start()
