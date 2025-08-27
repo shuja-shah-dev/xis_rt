@@ -50,26 +50,47 @@ def stop_stream():
     genicam_service.stop()
     return jsonify({"status": "success", "result": "Stream stopped"})
 
-def register_socketio_events(socketio, genicam_service):
-    @socketio.on("connect")
-    def on_connect():
-        from flask_socketio import join_room, emit
+def register_socketio_events(socketio_instance, genicam_service_instance):
+    from flask_socketio import join_room, leave_room, emit
+    
+    @socketio_instance.on("join_stream", namespace="/ws")
+    def on_join_stream():
         join_room("stream")
-        clients = genicam_service.client_joined()
+        clients = genicam_service_instance.client_joined()
+        emit("status", {"message": "Joined stream room", "clients": clients})
+        print(f"Client joined stream room. Total clients: {clients}")
+    
+    @socketio_instance.on("connect", namespace="/ws")
+    def on_connect():
+        join_room("stream")
+        clients = genicam_service_instance.client_joined()
         emit("status", {"message": "Connected", "clients": clients})
-
-    @socketio.on("disconnect")
+        print(f"Client connected. Total clients: {clients}")
+    
+    @socketio_instance.on("disconnect", namespace="/ws")
     def on_disconnect():
-        from flask_socketio import leave_room
         leave_room("stream")
-        clients = genicam_service.client_left()
-
-    @socketio.on("set_confidence")
+        clients = genicam_service_instance.client_left()
+        print(f"Client disconnected. Total clients: {clients}")
+    
+    @socketio_instance.on("set_confidence", namespace="/ws")
     def on_set_confidence(data):
-        from flask_socketio import emit
         try:
-            value = float(data.get("value", genicam_service.conf_threshold))
-            new_val = genicam_service.set_confidence(value)
+            value = float(data.get("value", genicam_service_instance.conf_threshold))
+            new_val = genicam_service_instance.set_confidence(value)
             emit("status", {"message": "confidence_updated", "value": new_val}, to="stream")
         except Exception as e:
             emit("status", {"message": f"error: {e}"})
+    
+    @socketio_instance.on("test_frame", namespace="/ws")
+    def on_test_frame():
+        test_payload = {
+            "frame": "test_base64_string",
+            "metrics": {
+                "camera_fps": 30.0,
+                "display_fps": 30.0,
+                "infer_ms": 15.5,
+                "conf_threshold": 0.6
+            }
+        }
+        emit("stream_frame", test_payload, to="stream")

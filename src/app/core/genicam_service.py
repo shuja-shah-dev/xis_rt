@@ -204,14 +204,14 @@ class GenICamService:
                 except queue.Empty:
                     continue
 
-                # Calculate FPS
+                
                 cam_fps = 0.0
                 if last_cap_ts is not None:
                     dt = max(1e-9, (cap_ts - last_cap_ts))
                     cam_fps = 1.0 / dt
                 last_cap_ts = cap_ts
 
-                # Run inference if detector exists
+                
                 infer_ms = 0
                 detections = []
                 if self.detector:
@@ -255,11 +255,13 @@ class GenICamService:
                 # EMIT THE FRAME - THIS IS THE CRITICAL PART
                 if self.socketio:
                     try:
+                        print(f"Emitting frame to {self.client_count} clients")
                         self.socketio.emit("stream_frame", payload, namespace="/ws")
                     except Exception as e:
                         print(f"Error emitting frame: {e}")
 
                 self.infer_q.task_done()
+
 
         except Exception as e:
             print(f"Inference loop error: {e}")
