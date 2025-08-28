@@ -1,7 +1,6 @@
-# app/__init__.py
 from flask import Flask
 from flask_cors import CORS
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, emit, join_room
 from config.settings import settings
 from app.core.mqtt_client import init_mqtt, mqtt
 from app.routes.mqtt_routes import mqtt_bp
@@ -14,17 +13,13 @@ import sys
 from app.core.config import AppConfig
 
 app_config = AppConfig()
-
 __PREFIX__ = "/api"
-
 socketio = SocketIO()
 
-# Global service instance for proper cleanup
 _genicam_service = None
-_socketio_instance = None  # Store socketio globally
+_socketio_instance = None
 
 def _cleanup_handler():
-    """Global cleanup handler"""
     global _genicam_service
     if _genicam_service:
         print("Performing application-level cleanup...")
@@ -34,13 +29,11 @@ def _cleanup_handler():
             print(f"Cleanup error: {e}")
 
 def _signal_handler(signum, frame):
-    """Handle shutdown signals"""
     print(f"Received signal {signum}, shutting down...")
     _cleanup_handler()
     sys.exit(0)
 
 def get_socketio():
-    """Get the global socketio instance"""
     global _socketio_instance
     return _socketio_instance
 
@@ -49,7 +42,6 @@ def create_app():
     
     app = Flask(__name__)
     
-    # Configure CORS with specific settings
     CORS(app, resources={
         r"/*": {
             "origins": "*",
@@ -58,7 +50,6 @@ def create_app():
         }
     })
 
-    # MQTT Configuration
     app.config["MQTT_BROKER_URL"] = settings.MQTT_BROKER_URL
     app.config["MQTT_BROKER_PORT"] = settings.MQTT_BROKER_PORT
     app.config["MQTT_USERNAME"] = settings.MQTT_USERNAME
@@ -68,18 +59,15 @@ def create_app():
     app.config["MQTT_TLS_ENABLED"] = settings.MQTT_TLS_ENABLED
     app.config["MQTT_LOGGING"] = settings.MQTT_LOGGING
 
-    # Initialize MQTT
     try:
         init_mqtt(app)
     except Exception as e:
         print(f"MQTT initialization failed: {e}")
 
-    # Register blueprints
     app.register_blueprint(mqtt_bp, url_prefix=__PREFIX__)
     app.register_blueprint(camera_bp, url_prefix=__PREFIX__)
     app.register_blueprint(model_bp, url_prefix=__PREFIX__)
     
-    # Create necessary directories
     directories = ["uploads", "cti", "models", "logs"]
     for directory in directories:
         if not os.path.exists(directory):
@@ -89,26 +77,48 @@ def create_app():
             except Exception as e:
                 print(f"Failed to create directory {directory}: {e}")
 
-    # Initialize SocketIO with improved configuration
     socketio.init_app(
         app, 
         cors_allowed_origins="*",
-        async_mode='threading',  # Use threading for better performance
+        async_mode='threading',
         ping_timeout=60,
         ping_interval=25,
-        logger=False,  # Disable verbose logging
-        engineio_logger=False
+        logger=True,  # CHANGED: Enable logging for debugging
+        engineio_logger=True  # CHANGED: Enable engineio logging
     )
     
-    # Store socketio globally so services can access it
     _socketio_instance = socketio
     print("SocketIO initialized and stored globally")
 
-    # Initialize GenICamService with proper cleanup registration
+    # ============ SOCKETIO EVENT HANDLERS MUST BE DEFINED AFTER INIT ============
+    @socketio.on('connect', namespace='/ws')
+    def handle_connect():
+        print('✅ Client connected to /ws namespace')
+        emit('status', {'message': 'Connected to WebSocket', 'connected': True})
+
+    @socketio.on('disconnect', namespace='/ws')  
+    def handle_disconnect():
+        print('❌ Client disconnected from /ws namespace')
+
+    @socketio.on('join_stream', namespace='/ws')
+    def handle_join_stream():
+        join_room('stream')
+        print('👥 Client joined stream room')
+        emit('status', {'message': 'Joined stream room', 'room': 'stream'})
+
+    @socketio.on('leave_stream', namespace='/ws')
+    def handle_leave_stream():
+        print('👋 Client left stream room')
+        emit('status', {'message': 'Left stream room'})
+    # ============================================================================
+
     try:
         from app.core.geni_inference import TensorRTGenICamDetector
-        _genicam_service = TensorRTGenICamDetector()
+        _genicam_service = TensorRTGenICamDetector(cti_file_path=r'E:\Workspace\Shuja\xis_rt\src\cti\ids_u3vgentlk.cti', websocket_mode=True)
+        
         _genicam_service.set_socketio(socketio)
+        
+        _genicam_service.initialize_tensorrt()
         _genicam_service.set_app_config(app_config)
         
         print("GenICamService initialized successfully with SocketIO")
@@ -116,18 +126,15 @@ def create_app():
         print(f"GenICamService initialization failed: {e}")
         _genicam_service = None
 
-    # Register inference routes with the service
     from app.routes.inference_routes import inference_bp, register_socketio_events
     app.register_blueprint(inference_bp, url_prefix=__PREFIX__)
     
-    # Register SocketIO events with the service instance
     try:
         register_socketio_events(socketio, _genicam_service)
         print("SocketIO events registered successfully")
     except Exception as e:
         print(f"SocketIO event registration failed: {e}")
 
-    # Health check endpoint with detailed status
     @app.route("/health")
     def health_check():
         health_status = {
@@ -140,7 +147,6 @@ def create_app():
             }
         }
         
-        # Add service-specific health info
         if _genicam_service:
             try:
                 service_status = _genicam_service.get_status()
@@ -149,13 +155,11 @@ def create_app():
                 health_status["services"]["genicam"] = False
                 health_status["genicam_error"] = str(e)
         
-        # Determine overall health
         if not all(health_status["services"].values()):
             health_status["status"] = "degraded"
             
         return health_status
 
-    # System info endpoint
     @app.route("/system/info")
     def system_info():
         try:
@@ -182,14 +186,12 @@ def create_app():
         except Exception as e:
             return {"status": "error", "message": str(e)}, 500
 
-    # Manual cleanup endpoint
     @app.route("/system/cleanup", methods=["POST"])
     def manual_cleanup():
         try:
             if _genicam_service:
                 _genicam_service.cleanup_all()
             
-            # Force garbage collection
             import gc
             gc.collect()
             
@@ -197,7 +199,6 @@ def create_app():
         except Exception as e:
             return {"status": "error", "message": f"Cleanup failed: {str(e)}"}, 500
 
-    # Error handlers
     @app.errorhandler(404)
     def not_found(error):
         return {"status": "error", "message": "Endpoint not found"}, 404
@@ -208,18 +209,13 @@ def create_app():
 
     @app.errorhandler(Exception)
     def handle_exception(e):
-        # Log the error
         app.logger.error(f"Unhandled exception: {str(e)}")
-        
-        # Return JSON instead of HTML for consistency
         return {"status": "error", "message": "An unexpected error occurred"}, 500
 
-    # Register cleanup handlers
     atexit.register(_cleanup_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
-    # Context processors for templates (if using)
     @app.context_processor
     def inject_config():
         return {
@@ -227,16 +223,12 @@ def create_app():
             'genicam_status': _genicam_service.get_status() if _genicam_service else None
         }
 
-    # Before request hooks
     @app.before_request
     def before_request():
-        # Add any pre-request processing here
         pass
 
-    # After request hooks
     @app.after_request
     def after_request(response):
-        # Add CORS headers if not already present
         response.headers.add('Access-Control-Allow-Origin', '*')
         response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
         response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
@@ -244,14 +236,11 @@ def create_app():
 
     print("Flask application created successfully")
     print(f"GenICam service: {'Initialized' if _genicam_service else 'Failed'}")
-    print(f"Available routes: {[rule.rule for rule in app.url_map.iter_rules()]}")
     
     return app
 
 def get_genicam_service():
-    """Get the global GenICam service instance"""
     global _genicam_service
     return _genicam_service
 
-# Export the service getter for use in other modules
 __all__ = ['create_app', 'socketio', 'get_genicam_service', 'get_socketio']

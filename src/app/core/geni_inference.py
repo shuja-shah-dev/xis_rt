@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 import signal
 from collections import deque
 import base64
-
+import gc
 try:
     import tkinter as tk
     from tkinter import filedialog
@@ -234,6 +234,28 @@ class TensorRTDetector:
         self.input_height = None
         self.input_width = None
 
+        self.client_lock = threading.Lock()
+        self.connected_clients = 0
+
+    def client_joined(self):
+        """Handle client joining"""
+        with self.client_lock:
+            self.connected_clients += 1
+            print(f"Client joined. Total clients: {self.connected_clients}")
+            return self.connected_clients
+    def client_left(self):
+        """Handle client leaving"""
+        with self.client_lock:
+            self.connected_clients = max(0, self.connected_clients - 1)
+            print(f"Client left. Total clients: {self.connected_clients}")
+            
+            # Auto-stop if no clients connected
+            if self.connected_clients == 0 and self.streaming_active:
+                print("No clients connected, auto-stopping stream in 30 seconds...")
+                threading.Timer(30.0, self._auto_stop_if_no_clients).start()
+            
+            return self.connected_clients
+
     def _init_io_buffers(self):
         assert cuda.Context.get_current() is not None, \
             "No active CUDA context! Make sure ctx.push() was called beforehand."
@@ -335,7 +357,7 @@ class TensorRTDetector:
      
         stream.synchronize()
         gpu_ms = (time.perf_counter() - t_gpu0) * 1e3
-        print(f"[GPU ] {gpu_ms:5.1f} ms") 
+        # print(f"[GPU ] {gpu_ms:5.1f} ms") 
 
         dets = outs["dets"]
         labels = outs["labels"]
@@ -422,12 +444,23 @@ class TensorRTGenICamDetector:
     def set_socketio(self, socketio):
         """Set the SocketIO instance for WebSocket communication"""
         self.socketio = socketio
+        self.debug_websocket_status()
         print("SocketIO instance set for WebSocket streaming")
 
     def set_app_config(self, app_config):
         """Set application configuration"""
         self.app_config = app_config
 
+    def setup_opencv_windows(self):
+        """Setup OpenCV window"""
+        if self.websocket_mode:
+            print("WebSocket mode - skipping OpenCV window setup")
+            return
+        cv2.namedWindow(self.inference_window, cv2.WINDOW_NORMAL)
+        cv2.moveWindow(self.inference_window, 700, 50)
+        cv2.resizeWindow(self.inference_window, self.display_width, self.display_height)
+        print("OpenCV inference window created")
+        
     def initialize_camera(self, cti_file_path=None):
         """Initialize GenICam camera using Harvesters"""
         try:
@@ -476,6 +509,86 @@ class TensorRTGenICamDetector:
 
     # ... [Keep all your existing methods: list_available_cameras, select_camera_interactive, etc.]
 
+
+    def select_camera_interactive(self):
+        """Interactive camera selection"""
+        cameras = self.list_available_cameras()
+        if not cameras:
+            return None
+        
+        if len(cameras) == 1:
+            print(f"Only one camera found. Using camera 0: {cameras[0]['vendor']} {cameras[0]['model']}")
+            return 0
+        
+        while True:
+            try:
+                choice = input(f"Select camera (0-{len(cameras)-1}, or press Enter for camera 0): ").strip()
+                if choice == "":
+                    return 0
+                camera_index = int(choice)
+                if 0 <= camera_index < len(cameras):
+                    return camera_index
+                else:
+                    print(f"Please enter a number between 0 and {len(cameras)-1}")
+            except ValueError:
+                print("Please enter a valid number")
+            except KeyboardInterrupt:
+                print("\nCamera selection cancelled")
+                return None
+            
+    def list_available_cameras(self):
+        """List all available cameras with details"""
+        if len(self.h.device_info_list) == 0:
+            print("No cameras found")
+            return []
+        
+        print("Available cameras:")
+        cameras = []
+        for i, device in enumerate(self.h.device_info_list):
+            vendor = getattr(device, 'vendor', 'Unknown')
+            model = getattr(device, 'model', 'Unknown')
+            serial = getattr(device, 'serial_number', 'Unknown')
+            user_name = getattr(device, 'user_defined_name', 'Unknown')
+            
+            camera_info = {
+                'index': i,
+                'vendor': vendor,
+                'model': model,
+                'serial': serial,
+                'user_name': user_name,
+                'device': device
+            }
+            cameras.append(camera_info)
+            
+            print(f"  [{i}] {vendor} {model}")
+            print(f"      Serial: {serial}")
+            if user_name != 'Unknown':
+                print(f"      User Name: {user_name}")
+            print()
+        
+        return cameras
+
+    def initialize_tensorrt(self):
+        """Initialize TensorRT detector"""
+        try:
+            print("Initializing TensorRT...")
+            t0 = time.perf_counter()
+            engine_path = r"E:\Workspace\Eman\Vim X\models\largefp16.engine"
+            if not os.path.exists(engine_path):
+                print(f"Engine not found: {engine_path}")
+                return
+
+            self.ctx.push()
+            self.detector = TensorRTDetector(engine_path, max_detections=1000)
+            load_ms = (time.perf_counter() - t0) * 1e3
+            print(f"TensorRT engine loaded in {load_ms:.1f} ms")
+            self.ctx.pop()
+
+            print("TensorRT engine loaded successfully")
+
+        except Exception as e:
+            print(f"TensorRT initialization error: {e}")
+
     def frame_to_base64(self, frame):
         """Convert OpenCV frame to base64 string for WebSocket transmission"""
         try:
@@ -489,7 +602,7 @@ class TensorRTGenICamDetector:
             return None
 
     def emit_websocket_frame(self, frame_with_detections, metadata=None):
-        """Emit frame through WebSocket"""
+        """Emit frame through WebSocket - thread-safe version"""
         if not self.socketio or not self.websocket_mode:
             return
         
@@ -510,14 +623,11 @@ class TensorRTGenICamDetector:
             data = {
                 'frame': base64_frame,
                 'timestamp': current_time,
-                'format': 'jpeg'
+                'format': 'jpeg',
+                'metadata': metadata or {}
             }
             
-            # Add metadata if provided
-            if metadata:
-                data.update(metadata)
-            
-            # Emit to WebSocket clients
+            # Use SocketIO's thread-safe emission method
             self.socketio.emit('stream_frame', data, namespace='/ws')
             
         except Exception as e:
@@ -540,69 +650,79 @@ class TensorRTGenICamDetector:
                     try:
                         frame, cap_ts = self.inference_queue.get_nowait()
                     except queue.Empty:
+                        time.sleep(0.001)  # Small sleep to prevent busy waiting
                         continue
 
-                    if last_cap_ts is not None:
-                        cam_fps = 1.0 / (cap_ts - last_cap_ts)
-                    else:
-                        cam_fps = 0
-                    last_cap_ts = cap_ts
+                    # Run TensorRT inference
+                    t0 = time.time()
+                    detections = self.detector.detect_raw_frame(frame, score_threshold=self.current_confidence_threshold)
+                    latency = (time.time() - t0) * 1000
 
-                except queue.Empty:
-                    continue
+                    # Visualize detections
+                    vis = visualize_detections_img(frame, detections)
 
-                if frame is None:
-                    continue
+                    # Calculate display FPS
+                    now = time.perf_counter()
+                    done_timestamps.append(now)
+                    while done_timestamps and now - done_timestamps[0] > 1.0:
+                        done_timestamps.popleft()
+                    disp_fps = len(done_timestamps)
+                    
+                    # Add FPS text to visualization
+                    cv2.putText(vis, f"{disp_fps:5.0f} DISPLAY FPS", (10, 78),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    
+                    # Add detection count
+                    cv2.putText(vis, f"{len(detections)} DETECTIONS", (10, 108),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                # Run TensorRT inference
-                t0 = time.time()
-                detections = self.detector.detect_raw_frame(frame, score_threshold=self.current_confidence_threshold)
-                latency = time.time() - t0
-                latency = latency * 1000
+                    # Prepare metadata
+                    metadata = {
+                        'detection_count': len(detections),
+                        'inference_latency_ms': latency,
+                        'processing_fps': disp_fps,
+                        'confidence_threshold': self.current_confidence_threshold
+                    }
 
-                # Visualize detections
-                t_post0 = time.perf_counter()
-                vis = visualize_detections_img(frame, detections)
-                post_ms = (time.perf_counter() - t_post0) * 1e3
+                    # Update latest detections
+                    with self.detection_lock:
+                        self.latest_detections = vis
 
-                # Calculate display FPS
-                now = time.perf_counter()
-                done_timestamps.append(now)
-
-                while done_timestamps and now - done_timestamps[0] > 1.0:
-                    done_timestamps.popleft()
-
-                disp_fps = len(done_timestamps)
-                
-                # Add FPS text to visualization
-                cv2.putText(vis, f"{disp_fps:5.0f} DISPLAY FPS", (10, 78),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                
-                # Add detection count
-                cv2.putText(vis, f"{len(detections)} DETECTIONS", (10, 108),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-                # Prepare metadata for WebSocket
-                metadata = {
-                    'detection_count': len(detections),
-                    'inference_latency_ms': latency,
-                    'processing_fps': disp_fps,
-                    'confidence_threshold': self.current_confidence_threshold
-                }
-
-                # Update latest detections for OpenCV display
-                with self.detection_lock:
-                    self.latest_detections = vis
-
-                # Emit frame via WebSocket if in websocket mode
-                if self.websocket_mode:
+                    # Emit frame via WebSocket
                     self.emit_websocket_frame(vis, metadata)
 
-                self.inference_queue.task_done()
+                    self.inference_queue.task_done()
 
+                except Exception as e:
+                    print(f"Inference worker error: {e}")
         finally:
             self.ctx.pop()
             print("TensorRT inference worker stopped")
+
+    def debug_websocket_status(self):
+        """Debug method to check WebSocket status"""
+        print(f"WebSocket Mode: {self.websocket_mode}")
+        print(f"SocketIO Instance: {self.socketio is not None}")
+        print(f"Streaming Active: {self.is_streaming}")
+        print(f"Inference Running: {self.inference_running}")
+        if self.socketio:
+            print("SocketIO server is available")
+
+    
+    def get_status(self):
+        """Get current streaming status for WebSocket clients"""
+        return {
+            'is_streaming': self.is_streaming,
+            'inference_running': self.inference_running,
+            'camera_connected': self.ia is not None,
+            'confidence_threshold': self.current_confidence_threshold,
+            'camera_info': {
+                'vendor': self.vendor if self.vendor else 'Unknown',
+                'pixel_format': self.pixel_format if self.pixel_format else 'Unknown',
+                'resolution': f"{self.display_width}x{self.display_height}"
+            } if self.ia else None
+        }
+
 
     def get_stream_status(self):
         """Get current streaming status for WebSocket clients"""
@@ -618,6 +738,302 @@ class TensorRTGenICamDetector:
             } if self.ia else None
         }
 
+    def run_normal(self):
+        """Run in pure WebSocket mode without any GUI components"""
+        try:
+            print("Starting TensorRT GenICam Detection System (WebSocket Mode)")
+            # Don't create any OpenCV windows
+            if not self.websocket_mode:
+                self.websocket_mode = True
+            # Initialize camera connection if available
+            if len(self.h.device_info_list) > 0:
+                print(f"Found {len(self.h.device_info_list)} camera(s)")
+                self.run_websocket_mode()
+                # Don't auto-connect, wait for WebSocket commands
+            else:
+                print("No cameras found")
+            print("WebSocket mode ready - waiting for commands...")
+            # Keep main thread alive without blocking
+            try:
+                while True:
+                    time.sleep(1)
+                    # Check if we should exit (you can add a shutdown flag here)
+            except KeyboardInterrupt:
+                print("Interrupted by user")
+            finally:
+                self.cleanup_resources()
+        except Exception as e:
+            print(f"Error in run_normal: {str(e)}")
+            import traceback
+            traceback.print_exc()
+ 
+   
+    def stop(self):
+        """Stop streaming with comprehensive cleanup"""
+        try: 
+            print("Stopping GenICam service...")
+            
+            # Signal shutdown
+            self.streaming_active = False
+            self.inference_active = False
+            self.shutdown_event.set()
+            
+            # Stop camera system - use new method if available
+            if self.camera_system:
+                if hasattr(self.camera_system, 'stop_streaming'):
+                    self.camera_system.stop_streaming()
+                else:
+                    # Fallback to old method
+                    self.camera_system.stop_streaming()
+            
+            # Wait for threads to finish
+            self._cleanup_threads()
+            
+            # Clear frame queues and cache
+            self._clear_frame_queues()
+            self._clear_frame_cache()
+            
+            # Notify clients
+            if self.socketio:
+                self.socketio.emit('status', {
+                    'message': 'Stream stopped',
+                    'streaming_active': False
+                }, namespace='/ws', to='stream')
+            
+            # Force garbage collection
+            gc.collect()
+            
+            print("GenICam service stopped successfully")
+            return True
+            
+        except Exception as e:
+            print(f"Failed to stop service: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    def _cleanup_threads(self):
+        """Clean up all threads"""
+        for thread in self.threads:
+            if thread.is_alive():
+                try:
+                    thread.join(timeout=3.0)
+                    if thread.is_alive():
+                        print(f"Warning: Thread {thread.name} did not stop cleanly")
+                except Exception as e:
+                    print(f"Error stopping thread {thread.name}: {e}")
+        
+        self.threads.clear()
+        self.websocket_thread = None
+    
+    def _clear_frame_queues(self):
+        """Clear all frame queues"""
+        queues_to_clear = [self.frame_queue]
+        if self.camera_system:
+            if hasattr(self.camera_system, 'frame_queue'):
+                queues_to_clear.append(self.camera_system.frame_queue)
+            if hasattr(self.camera_system, 'inference_queue'):
+                queues_to_clear.append(self.camera_system.inference_queue)
+        
+        for q in queues_to_clear:
+            while not q.empty():
+                try:
+                    frame = q.get_nowait()
+                    if isinstance(frame, (tuple, list)) and len(frame) > 0:
+                        del frame[0]
+                    del frame
+                except queue.Empty:
+                    break
+                except Exception as e:
+                    print(f"Error clearing queue: {e}")
+    
+    def _clear_frame_cache(self):
+        """Clear frame cache"""
+        self.frame_cache.clear()
+        gc.collect()
+    
+    def _check_memory_usage(self):
+        """Check memory usage and trigger cleanup if needed"""
+        self._memory_check_counter += 1
+        if self._memory_check_counter % 50 == 0:  # Check every 50 frames
+            if not self.memory_monitor.check_memory():
+                self._clear_frame_cache()
+                gc.collect()
+    
+        
+    def _calculate_display_size(self, width, height, max_display_width=1920, max_display_height=1080):
+        width_scale = max_display_width / width
+        height_scale = max_display_height / height
+        scale = min(width_scale, height_scale, 1.0)
+        return int(width * scale), int(height * scale)
+    
+    def process_frame(self, buffer):
+        """Process frame from GenICam camera to RGB format"""
+        component = buffer.payload.components[0]
+        width, height, data = component.width, component.height, component.data
+
+        # Handle different pixel formats
+        if self.pixel_format == "RGB8":
+            image = data.reshape((height, width, 3))
+            if self.vendor.lower().startswith("allied vision"):
+                image = image[..., ::-1]  # Swap channels for Allied Vision
+        elif self.pixel_format == "BGR8":
+            bgr = data.reshape((height, width, 3))
+            image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        elif self.pixel_format == "Mono8":
+            mono = data.reshape((height, width))
+            image = cv2.cvtColor(mono, cv2.COLOR_GRAY2RGB)
+        elif self.pixel_format.startswith("Bayer"):
+            raw = data.reshape((height, width))
+            if "RG" in self.pixel_format:
+                image = cv2.cvtColor(raw, cv2.COLOR_BayerRG2RGB)
+            elif "GR" in self.pixel_format:
+                image = cv2.cvtColor(raw, cv2.COLOR_BayerGR2RGB)
+            elif "BG" in self.pixel_format:
+                image = cv2.cvtColor(raw, cv2.COLOR_BayerBG2RGB)
+            elif "GB" in self.pixel_format:
+                image = cv2.cvtColor(raw, cv2.COLOR_BayerGB2RGB)
+            else:
+                image = cv2.cvtColor(raw, cv2.COLOR_GRAY2RGB)
+        else:
+            print(f"[Warning] Unknown format {self.pixel_format}, fallback gray")
+            gray = data.reshape((height, width))
+            image = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+
+        if image.dtype != np.uint8:
+            image = image.astype(np.uint8)
+        if not image.flags.writeable:
+            image = image.copy()
+        return image
+
+    
+    def connect_camera(self, camera_index=None):
+        """Connect to specific camera with proper resource management"""
+        try:
+            # Clean up any existing connection first
+            if self.ia:
+                print("Disconnecting existing camera...")
+                try:
+                    self.ia.stop()
+                    self.ia.destroy()
+                except:
+                    pass
+                self.ia = None
+                time.sleep(0.5)  # Give camera time to release
+            if camera_index is None:
+                if self.websocket_mode:
+                    camera_index = 0  # Default to first camera in websocket mode
+                else:
+                    camera_index = self.select_camera_interactive()
+                    if camera_index is None:
+                        raise ValueError("No camera selected")
+            if camera_index >= len(self.h.device_info_list):
+                raise ValueError(f"Camera index {camera_index} not available. Found {len(self.h.device_info_list)} cameras.")
+            print(f"Connecting to camera {camera_index}...")
+            self.ia = self.h.create(camera_index)
+            if not self.ia:
+                raise RuntimeError(f"Failed to create camera instance for index {camera_index}")
+            node_map = self.ia.remote_device.node_map
+            self.vendor = self.h.device_info_list[camera_index].vendor
+    
+            self.original_pixel_format = node_map.PixelFormat.value
+            print(f"Original pixel format: {self.original_pixel_format}")
+    
+            # Get maximum resolution
+            max_width = node_map.Width.max
+            max_height = node_map.Height.max
+            node_map.Width.value = max_width
+            node_map.Height.value = max_height
+    
+            # Set best available format
+            available_formats = list(node_map.PixelFormat.symbolics)
+            format_priority = ["RGB8", "BGR8", "BayerRG8", "BayerGR8", "BayerBG8", "BayerGB8", "Mono8"]
+            selected_format = None
+            for fmt in format_priority:
+                if fmt in available_formats:
+                    try:
+                        node_map.PixelFormat.value = fmt
+                        selected_format = fmt
+                        break
+                    except:
+                        continue
+            if not selected_format:
+                selected_format = node_map.PixelFormat.value
+            self.pixel_format = selected_format
+    
+            final_width = node_map.Width.value
+            final_height = node_map.Height.value
+    
+            print(f"Connected to {self.vendor} camera")
+            print(f"Resolution: {final_width}x{final_height}, Format: {self.pixel_format}")
+    
+            # Calculate display size
+            self.display_width, self.display_height = self._calculate_display_size(final_width, final_height)
+            print(f"Display size: {self.display_width}x{self.display_height}")
+            return True
+        except Exception as e:
+            print(f"Failed to connect to camera: {e}")
+            if self.ia:
+                try:
+                    self.ia.destroy()
+                except:
+                    pass
+                self.ia = None
+            raise
+
+    def camera_capture_worker(self):
+        """Camera capture worker thread"""
+        try:
+            self.ia.start()
+            frame_count = 0
+            
+            while self.is_streaming:
+                try:
+                    with self.ia.fetch(timeout=2000) as buffer:
+                        # Process frame to RGB format
+                        frame = self.process_frame(buffer)
+                        
+                        # Convert RGB to BGR for OpenCV processing
+                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                        
+                        current_time = time.perf_counter()
+                        
+                        # Update frame counting
+                        frame_count += 1
+                        if self.camera_start_time is None:
+                            self.camera_start_time = current_time
+                        
+                        # Send to inference queue with letterboxing
+                        if self.inference_running and not self.inference_queue.full():
+                            # Letterbox to 640x640
+                            h, w = frame_bgr.shape[:2]
+                            scale = min(640 / h, 640 / w)
+                            nw, nh = int(round(w * scale)), int(round(h * scale))
+                            resized = cv2.resize(frame_bgr, (nw, nh))
+                            canvas = np.full((640, 640, 3), 114, dtype=np.uint8)
+                            top, left = (640 - nh) // 2, (640 - nw) // 2
+                            canvas[top:top + nh, left:left + nw] = resized
+                            
+                            try:
+                                self.inference_queue.put_nowait((canvas, current_time))
+                            except queue.Full:
+                                pass
+                        
+                        # Send to display queue
+                        if not self.frame_queue.full():
+                            self.frame_queue.put(frame_bgr)
+                        
+                        if frame_count % 100 == 0:
+                            print(f"Frame {frame_count} processed")
+                            
+                except Exception as e:
+                    if self.is_streaming:
+                        print(f"Frame capture error: {e}")
+                        time.sleep(0.01)
+                        
+        except Exception as e:
+            print(f"Camera worker error: {e}")
+
+
     def update_confidence_threshold(self, threshold):
         """Update confidence threshold via WebSocket command"""
         if 0.1 <= threshold <= 0.9:
@@ -625,8 +1041,10 @@ class TensorRTGenICamDetector:
             return {'success': True, 'threshold': threshold}
         return {'success': False, 'error': 'Threshold must be between 0.1 and 0.9'}
 
+    
     def websocket_start_streaming(self, camera_index=0):
         """Start streaming specifically for WebSocket mode"""
+        print("Streaming")
         if self.is_streaming:
             return {'success': False, 'error': 'Already streaming'}
         
@@ -649,6 +1067,80 @@ class TensorRTGenICamDetector:
             return {'success': True, 'message': 'Streaming stopped'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
+        
+    def start_streaming(self):
+        """Start camera streaming with TensorRT inference"""
+        if self.is_streaming:
+            return
+            
+        try:
+            if self.detector is None:
+                print("TensorRT not initialized. Please restart the application.")
+                return
+            
+            if self.ia is None:
+                print("Camera not connected.")
+                return
+            
+            # Reset counters
+            self.camera_frame_count = 0
+            self.camera_start_time = None
+            
+            # Start inference worker
+            self.inference_running = True
+            self.inference_thread = threading.Thread(target=self.inference_worker, daemon=True)
+            self.inference_thread.start()
+            
+            # Start camera capture worker
+            self.is_streaming = True
+            self.camera_thread = threading.Thread(target=self.camera_capture_worker, daemon=True)
+            self.camera_thread.start()
+            
+            print("Streaming started with TensorRT inference...")
+            
+        except Exception as e:
+            print(f"Failed to start streaming: {str(e)}")
+
+        
+    def stop_streaming(self):
+        """Stop camera streaming and TensorRT inference"""
+        if not self.is_streaming:
+            return
+
+        try:
+            self.is_streaming = False
+            self.inference_running = False
+
+            if self.inference_thread and self.inference_thread.is_alive():
+                self.inference_thread.join(timeout=2.0)
+
+            if hasattr(self, 'camera_thread') and self.camera_thread.is_alive():
+                self.camera_thread.join(timeout=2.0)
+
+            if self.ia:
+                try:
+                    self.ia.stop()
+                    self.ia.destroy()
+                except:
+                    pass
+                self.ia = None
+
+            if self.h:
+                self.h.reset()
+
+            # Clean up CUDA context
+            if self.ctx is not None:
+                try:
+                    self.ctx.pop()
+                except cuda.LogicError:
+                    pass
+                self.ctx.detach()
+                self.ctx = None
+
+            print("Camera streaming stopped")
+
+        except Exception as e:
+            print(f"Failed to stop streaming: {e}")
 
     # ... [Keep all your existing methods: start_streaming, stop_streaming, etc.]
 
@@ -660,6 +1152,7 @@ class TensorRTGenICamDetector:
         if len(self.h.device_info_list) > 0:
             self.connect_camera(0)  # Use first camera
             print("Camera connected. Ready for WebSocket commands.")
+            self.websocket_start_streaming(camera_index=0)
         else:
             print("No cameras found. Waiting for commands...")
         
@@ -673,6 +1166,133 @@ class TensorRTGenICamDetector:
         finally:
             self.stop_streaming()
             print("WebSocket mode cleanup completed")
+ 
+    def cleanup_resources(self):
+
+        """Properly cleanup all camera and CUDA resources"""
+
+        print("Cleaning up resources...")
+
+        try:
+
+            # Stop streaming first
+
+            if self.is_streaming:
+
+                self.is_streaming = False
+
+                self.inference_running = False
+
+            # Wait for threads to finish
+
+            if hasattr(self, 'camera_thread') and self.camera_thread and self.camera_thread.is_alive():
+
+                self.camera_thread.join(timeout=2.0)
+
+            if hasattr(self, 'inference_thread') and self.inference_thread and self.inference_thread.is_alive():
+
+                self.inference_thread.join(timeout=2.0)
+
+            # Clean up camera
+
+            if self.ia:
+
+                try:
+
+                    self.ia.stop()
+
+                    self.ia.destroy()
+
+                    print("Camera stopped and destroyed")
+
+                except Exception as e:
+
+                    print(f"Error stopping camera: {e}")
+
+                finally:
+
+                    self.ia = None
+
+            # Clean up harvester
+
+            if self.h:
+
+                try:
+
+                    self.h.reset()
+
+                    print("Harvester reset")
+
+                except Exception as e:
+
+                    print(f"Error resetting harvester: {e}")
+
+            # Clean up CUDA context
+
+            if hasattr(self, 'ctx') and self.ctx:
+
+                try:
+
+                    # Pop context if it's current
+
+                    current_ctx = None
+
+                    try:
+
+                        current_ctx = cuda.Context.get_current()
+
+                    except:
+
+                        pass
+
+                    if current_ctx == self.ctx:
+
+                        self.ctx.pop()
+
+                        print("CUDA context popped")
+
+                    self.ctx.detach()
+
+                    self.ctx = None
+
+                    print("CUDA context detached")
+
+                except Exception as e:
+
+                    print(f"Error cleaning CUDA context: {e}")
+
+            # Force garbage collection
+
+            gc.collect()
+
+            print("Resource cleanup completed")
+
+        except Exception as e:
+
+            print(f"Error during resource cleanup: {e}")
+    
+        def cleanup_all(self):
+            """Comprehensive cleanup of all resources"""
+            print("Starting GenICam service cleanup...")
+            
+            try:
+                # Stop streaming
+                self.stop()
+                
+                # Clean up resource manager
+                self.resource_manager.cleanup_all()
+                
+                # Reset client count
+                with self.client_lock:
+                    self.connected_clients = 0
+                
+                # Final garbage collection
+                gc.collect()
+                
+                print("GenICam service cleanup completed")
+                
+            except Exception as e:
+                print(f"Error during GenICam cleanup: {e}")
 
     def run(self):
         """Main run loop - chooses between GUI and WebSocket mode"""

@@ -6,8 +6,7 @@ const Inference = () => {
   const [socket, setSocket] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
   const socketRef = useRef(null);
-
-  useEffect(() => {
+useEffect(() => {
   if (streaming && !socketRef.current) {
     const newSocket = io("http://localhost:5000/ws", {
       transports: ["websocket", "polling"],
@@ -17,8 +16,6 @@ const Inference = () => {
     newSocket.on("connect", () => {
       console.log("Connected to WebSocket /ws namespace");
       setConnectionStatus("Connected");
-      
-      // JOIN THE STREAM ROOM AFTER CONNECTION
       newSocket.emit("join_stream");
     });
     
@@ -80,9 +77,12 @@ const Inference = () => {
     }
   };
 }, [streaming]);
+ 
 
   const startStream = async () => {
     try {
+      console.log("Btn pressed")
+      setStreaming(true);
       const res = await fetch("http://localhost:5000/api/stream/normal", {
         method: "POST",
         headers: {
@@ -91,6 +91,7 @@ const Inference = () => {
       });
 
       const data = await res.json();
+      console.log("response", data)
       
       if (res.ok) {
         console.log("Stream started successfully:", data);
