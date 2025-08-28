@@ -111,44 +111,12 @@ class GenICamService:
         """Set the application configuration"""
         self.app_config = app_config
         print("App config set on GenICamService")
-    
-    # def _initialize_camera(self):
-    #     """Initialize camera system with proper error handling"""
-    #     try:
-    #         if self.camera_system is None:
-    #             print("Initializing TensorRT camera system...")
-    #             self.camera_system = TensorRTGenICamDetector()
-    #             self.resource_manager.register_resource(
-    #                 self.camera_system, 
-    #                 self._cleanup_camera_system
-    #             )
-                
-    #             # Configure for WebSocket mode
-    #             self.camera_system.websocket_mode = True
-    #             self.camera_system.websocket_server = self
-                
-    #             # Connect to first available camera
-    #             if len(self.camera_system.h.device_info_list) > 0:
-    #                 self.camera_system.connect_camera(0)
-    #                 print("Camera connected successfully")
-    #             else:
-    #                 print("No cameras found")
-    #                 return False
-    #             return True
-    #         return True
-    #     except Exception as e:
-    #         print(f"Camera initialization failed: {e}")
-    #         import traceback
-    #         traceback.print_exc()
-    #         self._cleanup_camera_system()
-    #         return False
-    
         
     def _initialize_camera(self):
         """Initialize camera system - temporary fix using simple camera"""
         try:
             if self.camera_system is None:
-                print("Initializing simple camera system (no CUDA)...")
+            
                 
                 # Get CTI file path from app config
                 cti_file_path = None

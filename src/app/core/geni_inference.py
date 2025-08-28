@@ -14,6 +14,7 @@ import os
 from typing import Dict, List, Optional
 import signal
 from collections import deque
+import base64
 
 try:
     import tkinter as tk
@@ -369,9 +370,13 @@ def visualize_detections_img(img: np.ndarray, detections: List[DetectionResult])
     return result
 
 class TensorRTGenICamDetector:
-    def __init__(self, cti_file_path=None):
-        if not HAS_TKINTER:
-            raise RuntimeError("tkinter is not available. Please install tkinter.")
+    def __init__(self, cti_file_path=None, websocket_mode=False):
+        if not HAS_TKINTER and not websocket_mode:
+            raise RuntimeError("tkinter is not available. Please install tkinter or use websocket_mode=True.")
+        
+        # WebSocket mode flag
+        self.websocket_mode = websocket_mode
+        self.socketio = None
         
         # Camera variables
         self.h = None
@@ -403,47 +408,25 @@ class TensorRTGenICamDetector:
         self.display_height = 720
         self.inference_window = "TensorRT GenICam Detection Results"
         
+        # WebSocket streaming settings
+        self.stream_fps = 30  # Target FPS for WebSocket streaming
+        self.last_websocket_frame_time = 0
+        self.websocket_frame_interval = 1.0 / self.stream_fps
+        
         # Initialize components
-        # self.initialize_camera()
-        # self.initialize_tensorrt()
-        # self.setup_opencv_windows()
-
         self.initialize_camera(cti_file_path)
         self.initialize_tensorrt()
         if not self.websocket_mode:
             self.setup_opencv_windows()
-            
-    # def initialize_camera(self):
-    #     """Initialize GenICam camera using Harvesters"""
-    #     try:
-    #         root = tk.Tk()
-    #         root.withdraw()
-            
-    #         cti_path = filedialog.askopenfilename(
-    #             title="Select GenTL Producer (.cti) File",
-    #             filetypes=[("GenTL Producer", "*.cti"), ("All Files", "*.*")]
-    #         )
-            
-    #         root.destroy()
-            
-    #         if not cti_path:
-    #             raise RuntimeError("No CTI file selected")
 
-    #         self.h = Harvester()
-    #         self.h.add_file(cti_path)
-    #         self.h.update()
-            
-    #         if len(self.h.device_info_list) == 0:
-    #             raise RuntimeError("No cameras found")
+    def set_socketio(self, socketio):
+        """Set the SocketIO instance for WebSocket communication"""
+        self.socketio = socketio
+        print("SocketIO instance set for WebSocket streaming")
 
-    #         print(f"Found {len(self.h.device_info_list)} camera(s)")
-    #         for i, device in enumerate(self.h.device_info_list):
-    #             print(f"Camera {i}: {device}")
-                
-    #     except Exception as e:
-    #         raise RuntimeError(f"Failed to initialize camera: {e}")
-    
-
+    def set_app_config(self, app_config):
+        """Set application configuration"""
+        self.app_config = app_config
 
     def initialize_camera(self, cti_file_path=None):
         """Initialize GenICam camera using Harvesters"""
@@ -490,189 +473,58 @@ class TensorRTGenICamDetector:
                 
         except Exception as e:
             raise RuntimeError(f"Failed to initialize camera: {e}")
-    
-    def list_available_cameras(self):
-        """List all available cameras with details"""
-        if len(self.h.device_info_list) == 0:
-            print("No cameras found")
-            return []
-        
-        print("Available cameras:")
-        cameras = []
-        for i, device in enumerate(self.h.device_info_list):
-            vendor = getattr(device, 'vendor', 'Unknown')
-            model = getattr(device, 'model', 'Unknown')
-            serial = getattr(device, 'serial_number', 'Unknown')
-            user_name = getattr(device, 'user_defined_name', 'Unknown')
-            
-            camera_info = {
-                'index': i,
-                'vendor': vendor,
-                'model': model,
-                'serial': serial,
-                'user_name': user_name,
-                'device': device
-            }
-            cameras.append(camera_info)
-            
-            print(f"  [{i}] {vendor} {model}")
-            print(f"      Serial: {serial}")
-            if user_name != 'Unknown':
-                print(f"      User Name: {user_name}")
-            print()
-        
-        return cameras
 
-    def select_camera_interactive(self):
-        """Interactive camera selection"""
-        cameras = self.list_available_cameras()
-        if not cameras:
-            return None
-        
-        if len(cameras) == 1:
-            print(f"Only one camera found. Using camera 0: {cameras[0]['vendor']} {cameras[0]['model']}")
-            return 0
-        
-        while True:
-            try:
-                choice = input(f"Select camera (0-{len(cameras)-1}, or press Enter for camera 0): ").strip()
-                if choice == "":
-                    return 0
-                camera_index = int(choice)
-                if 0 <= camera_index < len(cameras):
-                    return camera_index
-                else:
-                    print(f"Please enter a number between 0 and {len(cameras)-1}")
-            except ValueError:
-                print("Please enter a valid number")
-            except KeyboardInterrupt:
-                print("\nCamera selection cancelled")
-                return None
+    # ... [Keep all your existing methods: list_available_cameras, select_camera_interactive, etc.]
 
-    def connect_camera(self, camera_index=None):
-        """Connect to specific camera"""
-        if camera_index is None:
-            camera_index = self.select_camera_interactive()
-            if camera_index is None:
-                raise ValueError("No camera selected")
-        
-        if camera_index >= len(self.h.device_info_list):
-            raise ValueError(f"Camera index {camera_index} not available. Found {len(self.h.device_info_list)} cameras.")
-        
-        self.ia = self.h.create(camera_index)
-        node_map = self.ia.remote_device.node_map
-        self.vendor = self.h.device_info_list[camera_index].vendor
-
-        self.original_pixel_format = node_map.PixelFormat.value
-        print(f"Original pixel format: {self.original_pixel_format}")
-
-        # Get maximum resolution
-        max_width = node_map.Width.max
-        max_height = node_map.Height.max
-        node_map.Width.value = max_width
-        node_map.Height.value = max_height
-
-        # Set best available format
-        available_formats = list(node_map.PixelFormat.symbolics)
-        format_priority = ["RGB8", "BGR8", "BayerRG8", "BayerGR8", "BayerBG8", "BayerGB8", "Mono8"]
-        selected_format = None
-        for fmt in format_priority:
-            if fmt in available_formats:
-                try:
-                    node_map.PixelFormat.value = fmt
-                    selected_format = fmt
-                    break
-                except:
-                    continue
-        if not selected_format:
-            selected_format = node_map.PixelFormat.value
-        self.pixel_format = selected_format
-
-        final_width = node_map.Width.value
-        final_height = node_map.Height.value
-
-        print(f"Connected to {self.vendor} camera")
-        print(f"Resolution: {final_width}x{final_height}, Format: {self.pixel_format}")
-
-        # Calculate display size
-        self.display_width, self.display_height = self._calculate_display_size(final_width, final_height)
-        print(f"Display size: {self.display_width}x{self.display_height}")
-        
-    def _calculate_display_size(self, width, height, max_display_width=1920, max_display_height=1080):
-        width_scale = max_display_width / width
-        height_scale = max_display_height / height
-        scale = min(width_scale, height_scale, 1.0)
-        return int(width * scale), int(height * scale)
-
-    def initialize_tensorrt(self):
-        """Initialize TensorRT detector"""
+    def frame_to_base64(self, frame):
+        """Convert OpenCV frame to base64 string for WebSocket transmission"""
         try:
-            print("Initializing TensorRT...")
-            t0 = time.perf_counter()
-            engine_path = r"E:\Workspace\Eman\Vim X\models\largefp16.engine"
-            if not os.path.exists(engine_path):
-                print(f"Engine not found: {engine_path}")
-                return
-
-            self.ctx.push()
-            self.detector = TensorRTDetector(engine_path, max_detections=1000)
-            load_ms = (time.perf_counter() - t0) * 1e3
-            print(f"TensorRT engine loaded in {load_ms:.1f} ms")
-            self.ctx.pop()
-
-            print("TensorRT engine loaded successfully")
-
+            # Encode frame as JPEG
+            _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # Convert to base64
+            jpg_as_text = base64.b64encode(buffer).decode('utf-8')
+            return jpg_as_text
         except Exception as e:
-            print(f"TensorRT initialization error: {e}")
+            print(f"Error converting frame to base64: {e}")
+            return None
+
+    def emit_websocket_frame(self, frame_with_detections, metadata=None):
+        """Emit frame through WebSocket"""
+        if not self.socketio or not self.websocket_mode:
+            return
+        
+        try:
+            # Throttle WebSocket frames to target FPS
+            current_time = time.time()
+            if current_time - self.last_websocket_frame_time < self.websocket_frame_interval:
+                return
             
-    def setup_opencv_windows(self):
-        """Setup OpenCV window"""
-        cv2.namedWindow(self.inference_window, cv2.WINDOW_NORMAL)
-        cv2.moveWindow(self.inference_window, 700, 50)
-        cv2.resizeWindow(self.inference_window, self.display_width, self.display_height)
-        print("OpenCV inference window created")
-
-    def process_frame(self, buffer):
-        """Process frame from GenICam camera to RGB format"""
-        component = buffer.payload.components[0]
-        width, height, data = component.width, component.height, component.data
-
-        # Handle different pixel formats
-        if self.pixel_format == "RGB8":
-            image = data.reshape((height, width, 3))
-            if self.vendor.lower().startswith("allied vision"):
-                image = image[..., ::-1]  # Swap channels for Allied Vision
-        elif self.pixel_format == "BGR8":
-            bgr = data.reshape((height, width, 3))
-            image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        elif self.pixel_format == "Mono8":
-            mono = data.reshape((height, width))
-            image = cv2.cvtColor(mono, cv2.COLOR_GRAY2RGB)
-        elif self.pixel_format.startswith("Bayer"):
-            raw = data.reshape((height, width))
-            if "RG" in self.pixel_format:
-                image = cv2.cvtColor(raw, cv2.COLOR_BayerRG2RGB)
-            elif "GR" in self.pixel_format:
-                image = cv2.cvtColor(raw, cv2.COLOR_BayerGR2RGB)
-            elif "BG" in self.pixel_format:
-                image = cv2.cvtColor(raw, cv2.COLOR_BayerBG2RGB)
-            elif "GB" in self.pixel_format:
-                image = cv2.cvtColor(raw, cv2.COLOR_BayerGB2RGB)
-            else:
-                image = cv2.cvtColor(raw, cv2.COLOR_GRAY2RGB)
-        else:
-            print(f"[Warning] Unknown format {self.pixel_format}, fallback gray")
-            gray = data.reshape((height, width))
-            image = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
-
-        if image.dtype != np.uint8:
-            image = image.astype(np.uint8)
-        if not image.flags.writeable:
-            image = image.copy()
-        return image
+            self.last_websocket_frame_time = current_time
+            
+            # Convert frame to base64
+            base64_frame = self.frame_to_base64(frame_with_detections)
+            if base64_frame is None:
+                return
+            
+            # Prepare data for WebSocket
+            data = {
+                'frame': base64_frame,
+                'timestamp': current_time,
+                'format': 'jpeg'
+            }
+            
+            # Add metadata if provided
+            if metadata:
+                data.update(metadata)
+            
+            # Emit to WebSocket clients
+            self.socketio.emit('stream_frame', data, namespace='/ws')
+            
+        except Exception as e:
+            print(f"Error emitting WebSocket frame: {e}")
 
     def inference_worker(self):
-        """TensorRT inference worker thread"""
+        """TensorRT inference worker thread with WebSocket support"""
         done_timestamps = deque()
         if self.detector is None or self.ctx is None:
             print("TensorRT not initialized.")
@@ -712,7 +564,6 @@ class TensorRTGenICamDetector:
                 t_post0 = time.perf_counter()
                 vis = visualize_detections_img(frame, detections)
                 post_ms = (time.perf_counter() - t_post0) * 1e3
-                print(f"[POST] {post_ms:5.1f} ms")
 
                 # Calculate display FPS
                 now = time.perf_counter()
@@ -722,11 +573,30 @@ class TensorRTGenICamDetector:
                     done_timestamps.popleft()
 
                 disp_fps = len(done_timestamps)
+                
+                # Add FPS text to visualization
                 cv2.putText(vis, f"{disp_fps:5.0f} DISPLAY FPS", (10, 78),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                
+                # Add detection count
+                cv2.putText(vis, f"{len(detections)} DETECTIONS", (10, 108),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
+                # Prepare metadata for WebSocket
+                metadata = {
+                    'detection_count': len(detections),
+                    'inference_latency_ms': latency,
+                    'processing_fps': disp_fps,
+                    'confidence_threshold': self.current_confidence_threshold
+                }
+
+                # Update latest detections for OpenCV display
                 with self.detection_lock:
                     self.latest_detections = vis
+
+                # Emit frame via WebSocket if in websocket mode
+                if self.websocket_mode:
+                    self.emit_websocket_frame(vis, metadata)
 
                 self.inference_queue.task_done()
 
@@ -734,146 +604,86 @@ class TensorRTGenICamDetector:
             self.ctx.pop()
             print("TensorRT inference worker stopped")
 
-    def camera_capture_worker(self):
-        """Camera capture worker thread"""
-        try:
-            self.ia.start()
-            frame_count = 0
-            
-            while self.is_streaming:
-                try:
-                    with self.ia.fetch(timeout=2000) as buffer:
-                        # Process frame to RGB format
-                        frame = self.process_frame(buffer)
-                        
-                        # Convert RGB to BGR for OpenCV processing
-                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                        
-                        current_time = time.perf_counter()
-                        
-                        # Update frame counting
-                        frame_count += 1
-                        if self.camera_start_time is None:
-                            self.camera_start_time = current_time
-                        
-                        # Send to inference queue with letterboxing
-                        if self.inference_running and not self.inference_queue.full():
-                            # Letterbox to 640x640
-                            h, w = frame_bgr.shape[:2]
-                            scale = min(640 / h, 640 / w)
-                            nw, nh = int(round(w * scale)), int(round(h * scale))
-                            resized = cv2.resize(frame_bgr, (nw, nh))
-                            canvas = np.full((640, 640, 3), 114, dtype=np.uint8)
-                            top, left = (640 - nh) // 2, (640 - nw) // 2
-                            canvas[top:top + nh, left:left + nw] = resized
-                            
-                            try:
-                                self.inference_queue.put_nowait((canvas, current_time))
-                            except queue.Full:
-                                pass
-                        
-                        # Send to display queue
-                        if not self.frame_queue.full():
-                            self.frame_queue.put(frame_bgr)
-                        
-                        if frame_count % 100 == 0:
-                            print(f"Frame {frame_count} processed")
-                            
-                except Exception as e:
-                    if self.is_streaming:
-                        print(f"Frame capture error: {e}")
-                        time.sleep(0.01)
-                        
-        except Exception as e:
-            print(f"Camera worker error: {e}")
+    def get_stream_status(self):
+        """Get current streaming status for WebSocket clients"""
+        return {
+            'is_streaming': self.is_streaming,
+            'inference_running': self.inference_running,
+            'camera_connected': self.ia is not None,
+            'confidence_threshold': self.current_confidence_threshold,
+            'camera_info': {
+                'vendor': self.vendor if self.vendor else 'Unknown',
+                'pixel_format': self.pixel_format if self.pixel_format else 'Unknown',
+                'resolution': f"{self.display_width}x{self.display_height}"
+            } if self.ia else None
+        }
 
-    def start_streaming(self):
-        """Start camera streaming with TensorRT inference"""
+    def update_confidence_threshold(self, threshold):
+        """Update confidence threshold via WebSocket command"""
+        if 0.1 <= threshold <= 0.9:
+            self.current_confidence_threshold = threshold
+            return {'success': True, 'threshold': threshold}
+        return {'success': False, 'error': 'Threshold must be between 0.1 and 0.9'}
+
+    def websocket_start_streaming(self, camera_index=0):
+        """Start streaming specifically for WebSocket mode"""
         if self.is_streaming:
-            return
-            
+            return {'success': False, 'error': 'Already streaming'}
+        
         try:
-            if self.detector is None:
-                print("TensorRT not initialized. Please restart the application.")
-                return
-            
+            # Connect to camera if not already connected
             if self.ia is None:
-                print("Camera not connected.")
-                return
+                if camera_index >= len(self.h.device_info_list):
+                    return {'success': False, 'error': f'Camera index {camera_index} not available'}
+                self.connect_camera(camera_index)
             
-            # Reset counters
-            self.camera_frame_count = 0
-            self.camera_start_time = None
-            
-            # Start inference worker
-            self.inference_running = True
-            self.inference_thread = threading.Thread(target=self.inference_worker, daemon=True)
-            self.inference_thread.start()
-            
-            # Start camera capture worker
-            self.is_streaming = True
-            self.camera_thread = threading.Thread(target=self.camera_capture_worker, daemon=True)
-            self.camera_thread.start()
-            
-            print("Streaming started with TensorRT inference...")
-            
+            self.start_streaming()
+            return {'success': True, 'message': 'Streaming started'}
         except Exception as e:
-            print(f"Failed to start streaming: {str(e)}")
+            return {'success': False, 'error': str(e)}
 
-    def stop_streaming(self):
-        """Stop camera streaming and TensorRT inference"""
-        if not self.is_streaming:
-            return
-
+    def websocket_stop_streaming(self):
+        """Stop streaming for WebSocket mode"""
         try:
-            self.is_streaming = False
-            self.inference_running = False
-
-            if self.inference_thread and self.inference_thread.is_alive():
-                self.inference_thread.join(timeout=2.0)
-
-            if hasattr(self, 'camera_thread') and self.camera_thread.is_alive():
-                self.camera_thread.join(timeout=2.0)
-
-            if self.ia:
-                try:
-                    self.ia.stop()
-                    self.ia.destroy()
-                except:
-                    pass
-                self.ia = None
-
-            if self.h:
-                self.h.reset()
-
-            # Clean up CUDA context
-            if self.ctx is not None:
-                try:
-                    self.ctx.pop()
-                except cuda.LogicError:
-                    pass
-                self.ctx.detach()
-                self.ctx = None
-
-            print("Camera streaming stopped")
-
+            self.stop_streaming()
+            return {'success': True, 'message': 'Streaming stopped'}
         except Exception as e:
-            print(f"Failed to stop streaming: {e}")
+            return {'success': False, 'error': str(e)}
 
-    def display_frames(self):
-        """Display frames with inference results"""
+    # ... [Keep all your existing methods: start_streaming, stop_streaming, etc.]
+
+    def run_websocket_mode(self):
+        """Run in WebSocket mode (no OpenCV display)"""
+        print("Running in WebSocket mode - no GUI display")
+        
+        # Connect to first available camera by default
+        if len(self.h.device_info_list) > 0:
+            self.connect_camera(0)  # Use first camera
+            print("Camera connected. Ready for WebSocket commands.")
+        else:
+            print("No cameras found. Waiting for commands...")
+        
         try:
-            if not self.frame_queue.empty():
-                frame = self.frame_queue.get()
-                with self.detection_lock:
-                    frame_with_detections = self.latest_detections if self.latest_detections is not None else frame
-                cv2.imshow(self.inference_window, frame_with_detections)
-        except Exception as e:
-            print(f"Display error: {e}")
+            # Keep the main thread alive
+            while True:
+                time.sleep(1)
+                
+        except KeyboardInterrupt:
+            print("Interrupted by user")
+        finally:
+            self.stop_streaming()
+            print("WebSocket mode cleanup completed")
 
     def run(self):
-        """Main run loop"""
-        print("Starting TensorRT GenICam Detection System")
+        """Main run loop - chooses between GUI and WebSocket mode"""
+        if self.websocket_mode:
+            self.run_websocket_mode()
+        else:
+            self.run_gui_mode()
+
+    def run_gui_mode(self):
+        """Original GUI mode with OpenCV display"""
+        print("Starting TensorRT GenICam Detection System (GUI Mode)")
         print("Press 'q' to quit, 's' to start/stop streaming")
         print("Press 'c' to decrease confidence, 'v' to increase confidence")
         
@@ -909,8 +719,9 @@ class TensorRTGenICamDetector:
         finally:
             self.stop_streaming()
             cv2.destroyAllWindows()
-            print("Cleanup completed")
-
+            print("GUI mode cleanup completed")
+            
+            
 def _sigint_handler(sig, frame):
     print("Ctrl-C received, shutting down...")
     global app

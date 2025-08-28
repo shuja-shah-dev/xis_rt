@@ -106,9 +106,9 @@ def create_app():
 
     # Initialize GenICamService with proper cleanup registration
     try:
-        from app.core.genicam_service import GenICamService
-        _genicam_service = GenICamService()
-        _genicam_service.set_socketio(socketio)  # Set socketio immediately
+        from app.core.geni_inference import TensorRTGenICamDetector
+        _genicam_service = TensorRTGenICamDetector()
+        _genicam_service.set_socketio(socketio)
         _genicam_service.set_app_config(app_config)
         
         print("GenICamService initialized successfully with SocketIO")
