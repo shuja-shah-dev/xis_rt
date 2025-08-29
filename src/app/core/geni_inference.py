@@ -234,28 +234,6 @@ class TensorRTDetector:
         self.input_height = None
         self.input_width = None
 
-        self.client_lock = threading.Lock()
-        self.connected_clients = 0
-
-    def client_joined(self):
-        """Handle client joining"""
-        with self.client_lock:
-            self.connected_clients += 1
-            print(f"Client joined. Total clients: {self.connected_clients}")
-            return self.connected_clients
-    def client_left(self):
-        """Handle client leaving"""
-        with self.client_lock:
-            self.connected_clients = max(0, self.connected_clients - 1)
-            print(f"Client left. Total clients: {self.connected_clients}")
-            
-            # Auto-stop if no clients connected
-            if self.connected_clients == 0 and self.streaming_active:
-                print("No clients connected, auto-stopping stream in 30 seconds...")
-                threading.Timer(30.0, self._auto_stop_if_no_clients).start()
-            
-            return self.connected_clients
-
     def _init_io_buffers(self):
         assert cuda.Context.get_current() is not None, \
             "No active CUDA context! Make sure ctx.push() was called beforehand."
@@ -391,6 +369,31 @@ def visualize_detections_img(img: np.ndarray, detections: List[DetectionResult])
         cv2.putText(result, label_text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
     return result
 
+class ResourceManager:
+    """Manages cleanup of resources"""
+    def __init__(self):
+        self.resources = []
+        self.cleanup_callbacks = []
+    
+    def register_resource(self, resource, cleanup_func=None):
+        """Register a resource for cleanup"""
+        self.resources.append(resource)
+        if cleanup_func:
+            self.cleanup_callbacks.append(cleanup_func)
+    
+    def cleanup_all(self):
+        """Clean up all registered resources"""
+        for callback in self.cleanup_callbacks:
+            try:
+                callback()
+            except Exception as e:
+                print(f"Cleanup callback error: {e}")
+        
+        self.resources.clear()
+        self.cleanup_callbacks.clear()
+        gc.collect()
+
+
 class TensorRTGenICamDetector:
     def __init__(self, cti_file_path=None, websocket_mode=False):
         if not HAS_TKINTER and not websocket_mode:
@@ -399,6 +402,7 @@ class TensorRTGenICamDetector:
         # WebSocket mode flag
         self.websocket_mode = websocket_mode
         self.socketio = None
+
         
         # Camera variables
         self.h = None
@@ -416,8 +420,19 @@ class TensorRTGenICamDetector:
         self.inference_thread = None
         self.inference_running = False
         self.latest_detections = None
+        self.resource_manager = ResourceManager()
         self.detection_lock = threading.Lock()
+        self.shutdown_event = threading.Event()
+        self.client_lock = threading.Lock()
+        self.camera_system = None
+        self.threads = []
+        self.frame_cache = deque(maxlen=10)
+
+        self.client_lock = threading.Lock()
         
+        self.connected_clients = 0
+
+
         # Performance tracking
         self.camera_frame_count = 0
         self.camera_start_time = None
@@ -446,6 +461,26 @@ class TensorRTGenICamDetector:
         self.socketio = socketio
         self.debug_websocket_status()
         print("SocketIO instance set for WebSocket streaming")
+    
+    def client_joined(self):
+        """Handle client joining"""
+        with self.client_lock:
+            self.connected_clients += 1
+            print(f"Client joined. Total clients: {self.connected_clients}")
+            return self.connected_clients
+    def client_left(self):
+        """Handle client leaving"""
+        with self.client_lock:
+            self.connected_clients = max(0, self.connected_clients - 1)
+            print(f"Client left. Total clients: {self.connected_clients}")
+            
+            # Auto-stop if no clients connected
+            if self.connected_clients == 0 and self.streaming_active:
+                print("No clients connected, auto-stopping stream in 30 seconds...")
+                threading.Timer(30.0, self._auto_stop_if_no_clients).start()
+            
+            return self.connected_clients
+        
 
     def set_app_config(self, app_config):
         """Set application configuration"""
@@ -1271,28 +1306,28 @@ class TensorRTGenICamDetector:
 
             print(f"Error during resource cleanup: {e}")
     
-        def cleanup_all(self):
-            """Comprehensive cleanup of all resources"""
-            print("Starting GenICam service cleanup...")
+    def cleanup_all(self):
+        """Comprehensive cleanup of all resources"""
+        print("Starting GenICam service cleanup...")
+        
+        try:
+            # Stop streaming
+            self.stop()
             
-            try:
-                # Stop streaming
-                self.stop()
-                
-                # Clean up resource manager
-                self.resource_manager.cleanup_all()
-                
-                # Reset client count
-                with self.client_lock:
-                    self.connected_clients = 0
-                
-                # Final garbage collection
-                gc.collect()
-                
-                print("GenICam service cleanup completed")
-                
-            except Exception as e:
-                print(f"Error during GenICam cleanup: {e}")
+            # Clean up resource manager
+            self.resource_manager.cleanup_all()
+            
+            # Reset client count
+            with self.client_lock:
+                self.connected_clients = 0
+            
+            # Final garbage collection
+            gc.collect()
+            
+            print("GenICam service cleanup completed")
+            
+        except Exception as e:
+            print(f"Error during GenICam cleanup: {e}")
 
     def run(self):
         """Main run loop - chooses between GUI and WebSocket mode"""
