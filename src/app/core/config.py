@@ -1,3 +1,6 @@
+import os
+
+
 class AppConfig:
     _instance = None
 
@@ -36,8 +39,22 @@ class AppConfig:
             "input_type": self.input_type,
             "model_selection": self.model_selection,
             "video_path": self.video_path,
-            "cti_file_location": self.cti_file_location
+            "cti_file_location": self.cti_file_location,
         }
+
+    def get_modlel_path(self):
+        if self.model_selection == "raw_dough":
+            return os.path.join(
+                os.path.dirname(__file__), "runtime_models", "raw_dough.engine"
+            )
+        elif self.model_selection == "baked_baguette":
+            return os.path.join(
+                os.path.dirname(__file__), "runtime_models", "baked_baguette.engine"
+            )
+        elif self.model_selection == "generic":
+            return os.path.join(
+                os.path.dirname(__file__), "runtime_models", "generic.engine"
+            )
 
     def validate_config(self):
         if not self.input_type:

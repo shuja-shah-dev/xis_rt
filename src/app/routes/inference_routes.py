@@ -36,12 +36,11 @@ def start_normal_stream():
             return jsonify({"status": "error", "message": message}), 400
 
         config = app_config.get_config()
-        model_path = config.get("model_path") or app_config.get(
-            "model_path", r"E:\Workspace\Eman\Vim X\models\largefp16.engine"
-        )
-        cti_file_path = config.get("cti_file_path") or app_config.get(
-            "cti_file_path", r"E:\Workspace\Shuja\xis_rt\src\cti\ids_u3vgentlk.cti"
-        )
+        # fall back model model  r"E:\Workspace\Eman\Vim X\models\largefp16.engine"
+        # fall back cti
+
+        model_path = app_config.get_modlel_path()
+        cti_file_path = app_config.get_cti()
 
         genicam_service = start_genicam_service_async(model_path, cti_file_path)
         if genicam_service is None:
