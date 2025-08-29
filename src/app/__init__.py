@@ -263,7 +263,6 @@ def create_app():
 
 
 def start_genicam_service_async(model_path, cti_file_path):
-    """Start GenICam service in a separate thread"""
     global _genicam_thread, _genicam_lock
 
     with _genicam_lock:
@@ -296,23 +295,26 @@ def start_genicam_service_async(model_path, cti_file_path):
 
 
 def stop_genicam_service():
-    """Stop GenICam service"""
     global _genicam_thread, _genicam_lock
 
+    print("Stopping GenICam service...")
+
+    service_ref = None
+    thread_ref = None
+
     with _genicam_lock:
-        if _genicam_service:
-            _genicam_service.stop_service()
-            _genicam_service.stop()
-           # _genicam_service.cleanup_all()
-            
+        service_ref = _genicam_service
+        thread_ref = _genicam_thread
 
-        if _genicam_thread and _genicam_thread.is_alive():
-            _genicam_thread.join(timeout=5.0)
-            if _genicam_thread.is_alive():
-                print("Warning: GenICam thread did not stop cleanly")
+    if service_ref:
+        service_ref.stop_service()
+    if thread_ref and thread_ref.is_alive():
+        print("Service thread will finish cleanup in background")
 
+    with _genicam_lock:
         _genicam_thread = None
-        return {"status": "stopped", "message": "Service stopped"}
+
+    return {"status": "stopped", "message": "Service stop initiated"}
 
 
 def get_genicam_service():

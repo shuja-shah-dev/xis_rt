@@ -187,24 +187,32 @@ def stop_stream():
         print("Stopping stream request...")
 
         genicam_service = get_genicam_service()
-        if genicam_service is None:
-            return (
-                jsonify(
-                    {"status": "error", "message": "GenICam service not available"}
-                ),
-                500,
-            )
+        success = False
+        try:
 
-        success = stop_genicam_service()
+            def stop_async():
+                try:
+                    stop_genicam_service()
+                except Exception as e:
+                    print(f"Background stop error: {e}")
+
+            stop_thread = threading.Thread(target=stop_async, daemon=True)
+            stop_thread.start()
+            success = True
+
+        except Exception as e:
+            error_msg = f"Failed to stop GenICam service: {str(e)}"
+            print(error_msg)
+            traceback.print_exc()
+            return jsonify({"status": "error", "message": error_msg}), 500
 
         if success:
             result = "Stream stopped successfully"
             status_code = 200
-            print(result)
+
         else:
             result = "Failed to stop stream"
             status_code = 500
-            print(result)
 
         return (
             jsonify(
@@ -310,7 +318,6 @@ def register_socketio_events(socketio_instance, genicam_service_instance=None):
 
     print("Registering SocketIO events...")
 
-    # Use the singleton service if none provided
     if genicam_service_instance is None:
         genicam_service_instance = get_genicam_service()
 
@@ -318,9 +325,7 @@ def register_socketio_events(socketio_instance, genicam_service_instance=None):
         print("Warning: Could not get GenICam service for SocketIO events")
         return
 
-    # Set SocketIO instance on the service
     genicam_service_instance.set_socketio(socketio_instance)
-    # Ensure app_config is set
     if genicam_service_instance.app_config is None:
         genicam_service_instance.set_app_config(app_config)
 

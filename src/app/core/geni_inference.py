@@ -644,13 +644,104 @@ class TensorRTGenICamDetector:
             self.cleanup_resources()
 
     def stop_service(self):
-        """Stop the service loop"""
+        """Stop the service loop - non-blocking version"""
         print("Stopping GenICam service...")
         self.service_running = False
         self.service_stop_event.set()
 
+        # Stop streaming in a separate thread to avoid blocking
         if self.is_streaming:
-            self.stop_streaming()
+            stop_thread = threading.Thread(
+                target=self._stop_streaming_async, daemon=True
+            )
+            stop_thread.start()
+
+        print("Stop signal sent - cleanup will continue in background")
+
+    def _stop_streaming_async(self):
+        """Async version of stop streaming to prevent blocking"""
+        try:
+            print("Stopping streaming asynchronously...")
+            self.is_streaming = False
+            self.inference_running = False
+
+            # Wait for threads with shorter timeouts
+            if self.inference_thread and self.inference_thread.is_alive():
+                self.inference_thread.join(timeout=1.0)  # Reduced timeout
+                if self.inference_thread.is_alive():
+                    print("Warning: Inference thread did not stop in time")
+
+            if hasattr(self, "camera_thread") and self.camera_thread.is_alive():
+                self.camera_thread.join(timeout=1.0)  # Reduced timeout
+                if self.camera_thread.is_alive():
+                    print("Warning: Camera thread did not stop in time")
+
+            self._cleanup_camera_safe()
+            self._cleanup_cuda_safe()
+
+            print("Streaming stopped successfully")
+
+        except Exception as e:
+            print(f"Error during async stop: {e}")
+
+    def _cleanup_camera_safe(self):
+        """Safely cleanup camera resources"""
+        try:
+            if self.ia:
+                try:
+                    if hasattr(self.ia, "is_streaming") and self.ia.is_streaming():
+                        self.ia.stop()
+                        time.sleep(0.1)  # Brief pause
+                except Exception as e:
+                    print(f"Error stopping camera stream: {e}")
+
+                try:
+                    self.ia.destroy()
+                    print("Camera destroyed")
+                except Exception as e:
+                    print(f"Error destroying camera: {e}")
+                finally:
+                    self.ia = None
+
+            if self.h:
+                try:
+                    self.h.reset()
+                    print("Harvester reset")
+                except Exception as e:
+                    print(f"Error resetting harvester: {e}")
+
+        except Exception as e:
+            print(f"Error in camera cleanup: {e}")
+
+    def _cleanup_cuda_safe(self):
+        """Safely cleanup CUDA context"""
+        try:
+            if self.ctx is not None:
+                try:
+                    # Check if context is current before popping
+                    try:
+                        current_ctx = cuda.Context.get_current()
+                        if current_ctx == self.ctx:
+                            self.ctx.pop()
+                            print("CUDA context popped")
+                    except cuda.LogicError:
+                        # Context not current, that's fine
+                        pass
+
+                    try:
+                        self.ctx.detach()
+                        print("CUDA context detached")
+                    except cuda.LogicError:
+                        # Already detached, that's fine
+                        pass
+
+                except Exception as e:
+                    print(f"Error cleaning CUDA context: {e}")
+                finally:
+                    self.ctx = None
+
+        except Exception as e:
+            print(f"Error in CUDA cleanup: {e}")
 
     def initialize_camera(self, cti_file_path=None):
         """Initialize GenICam camera using Harvesters"""
@@ -674,9 +765,9 @@ class TensorRTGenICamDetector:
 
             if not os.path.exists(cti_file_path):
                 raise RuntimeError(f"CTI file not found: {cti_file_path}")
-            
+
             print(f"Using CTI file: {cti_file_path}")
-            
+
             self.h = Harvester()
             self.h.add_file(cti_file_path)
             self.h.update()
@@ -758,7 +849,7 @@ class TensorRTGenICamDetector:
         try:
             # Default path - will be overridden by initialize_tensorrt_with_path
             engine_path = r"E:\Workspace\Eman\Vim X\models\largefp16.engine"
-            
+
             if not os.path.exists(engine_path):
                 print(f"Engine not found at default path: {engine_path}")
                 print("TensorRT will be initialized later with specific path")
@@ -952,10 +1043,10 @@ class TensorRTGenICamDetector:
         """Non-blocking version - just prepares the service"""
         try:
             print("Starting GenICam service (non-blocking)")
-            
+
             if not self.websocket_mode:
                 self.websocket_mode = True
-            
+
             # Just check if cameras are available - don't start anything yet
             if self.h and len(self.h.device_info_list) > 0:
                 print(f"Found {len(self.h.device_info_list)} camera(s)")
@@ -963,12 +1054,14 @@ class TensorRTGenICamDetector:
             else:
                 print("No cameras found")
                 return False
-                
+
         except Exception as e:
             print(f"Error in run_normal: {str(e)}")
             import traceback
+
             traceback.print_exc()
             return False
+
     def stop(self):
         """Stop streaming with comprehensive cleanup"""
         try:
@@ -1121,7 +1214,7 @@ class TensorRTGenICamDetector:
             image = data.reshape((height, width, 3))
             if self.vendor.lower().startswith("allied vision"):
                 image = image[..., ::-1]  # Swap channels for Allied Vision
-                
+
         elif self.pixel_format == "BGR8":
             bgr = data.reshape((height, width, 3))
             image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -1150,7 +1243,6 @@ class TensorRTGenICamDetector:
         if not image.flags.writeable:
             image = image.copy()
         return image
-
 
     def connect_camera(self, camera_index=None):
         """Connect to specific camera with proper resource management"""
@@ -1256,9 +1348,9 @@ class TensorRTGenICamDetector:
 
                         # Convert RGB to BGR for OpenCV processing
                         # frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                        
+
                         current_time = time.perf_counter()
-                        
+
                         # Update frame counting
                         frame_count += 1
                         if self.camera_start_time is None:
@@ -1370,61 +1462,29 @@ class TensorRTGenICamDetector:
             print(f"Failed to start streaming: {str(e)}")
 
     def stop_streaming(self):
-        """Stop camera streaming and TensorRT inference"""
+        """Non-blocking stop streaming"""
         if not self.is_streaming:
             return
 
-        try:
-            self.is_streaming = False
-            self.inference_running = False
+        print("Initiating stream stop...")
 
-            if self.inference_thread and self.inference_thread.is_alive():
-                self.inference_thread.join(timeout=2.0)
+        self.is_streaming = False
+        self.inference_running = False
 
-            if hasattr(self, "camera_thread") and self.camera_thread.is_alive():
-                self.camera_thread.join(timeout=2.0)
-
-            if self.ia:
-                try:
-                    self.ia.stop()
-                    self.ia.destroy()
-                except:
-                    pass
-                self.ia = None
-
-            if self.h:
-                self.h.reset()
-
-            # Clean up CUDA context
-            if self.ctx is not None:
-                try:
-                    self.ctx.pop()
-                except cuda.LogicError:
-                    pass
-                self.ctx.detach()
-                self.ctx = None
-
-            print("Camera streaming stopped")
-
-        except Exception as e:
-            print(f"Failed to stop streaming: {e}")
-
-    # ... [Keep all your existing methods: start_streaming, stop_streaming, etc.]
+        print("Stream stop initiated - cleanup will continue in background")
 
     def run_websocket_mode(self):
         """Run in WebSocket mode (no OpenCV display)"""
         print("Running in WebSocket mode - no GUI display")
 
-        # Connect to first available camera by default
         if len(self.h.device_info_list) > 0:
-            self.connect_camera(0)  # Use first camera
+            self.connect_camera(0)
             print("Camera connected. Ready for WebSocket commands.")
             self.websocket_start_streaming(camera_index=0)
         else:
             print("No cameras found. Waiting for commands...")
 
         try:
-            # Keep the main thread alive
             while True:
                 time.sleep(1)
 
@@ -1435,132 +1495,66 @@ class TensorRTGenICamDetector:
             print("WebSocket mode cleanup completed")
 
     def cleanup_resources(self):
-        """Properly cleanup all camera and CUDA resources"""
-
-        print("Cleaning up resources...")
+        print("Starting resource cleanup...")
 
         try:
-
-            # Stop streaming first
-
             if self.is_streaming:
+                self.stop_streaming()
+            cleanup_thread = threading.Thread(target=self._async_cleanup, daemon=True)
+            cleanup_thread.start()
 
-                self.is_streaming = False
-
-                self.inference_running = False
-
-            # Wait for threads to finish
-
-            if (
-                hasattr(self, "camera_thread")
-                and self.camera_thread
-                and self.camera_thread.is_alive()
-            ):
-
-                self.camera_thread.join(timeout=2.0)
-
-            if (
-                hasattr(self, "inference_thread")
-                and self.inference_thread
-                and self.inference_thread.is_alive()
-            ):
-
-                self.inference_thread.join(timeout=2.0)
-
-            # Clean up camera
-
-            if self.ia:
-
-                try:
-
-                    self.ia.stop()
-
-                    self.ia.destroy()
-
-                    print("Camera stopped and destroyed")
-
-                except Exception as e:
-
-                    print(f"Error stopping camera: {e}")
-
-                finally:
-
-                    self.ia = None
-
-            # Clean up harvester
-
-            if self.h:
-
-                try:
-
-                    self.h.reset()
-
-                    print("Harvester reset")
-
-                except Exception as e:
-
-                    print(f"Error resetting harvester: {e}")
-
-            # Clean up CUDA context
-
-            if hasattr(self, "ctx") and self.ctx:
-
-                try:
-
-                    # Pop context if it's current
-
-                    current_ctx = None
-
-                    try:
-
-                        current_ctx = cuda.Context.get_current()
-
-                    except:
-
-                        pass
-
-                    if current_ctx == self.ctx:
-
-                        self.ctx.pop()
-
-                        print("CUDA context popped")
-
-                    self.ctx.detach()
-
-                    self.ctx = None
-
-                    print("CUDA context detached")
-
-                except Exception as e:
-
-                    print(f"Error cleaning CUDA context: {e}")
-
-            # Force garbage collection
-
-            gc.collect()
-
-            print("Resource cleanup completed")
+            print("Resource cleanup initiated in background")
 
         except Exception as e:
+            print(f"Error initiating cleanup: {e}")
 
-            print(f"Error during resource cleanup: {e}")
+    def _async_cleanup(self):
+        try:
+            time.sleep(0.5)
+
+            self._cleanup_camera_safe()
+            self._cleanup_cuda_safe()
+            self._clear_queues_safe()
+
+            gc.collect()
+            print("Async cleanup completed")
+
+        except Exception as e:
+            print(f"Error in async cleanup: {e}")
+
+    def _clear_queues_safe(self):
+        """Safely clear all queues without blocking"""
+        try:
+
+            for queue_obj in [self.frame_queue, self.inference_queue]:
+                cleared = 0
+                while not queue_obj.empty() and cleared < 100:
+                    try:
+                        queue_obj.get_nowait()
+                        cleared += 1
+                    except:
+                        break
+
+            if hasattr(self, "frame_cache"):
+                self.frame_cache.clear()
+
+            print(f"Queues cleared")
+
+        except Exception as e:
+            print(f"Error clearing queues: {e}")
 
     def cleanup_all(self):
         """Comprehensive cleanup of all resources"""
         print("Starting GenICam service cleanup...")
 
         try:
-            # Stop streaming
+
             self.stop()
 
-            # Clean up resource manager
             self.resource_manager.cleanup_all()
-
-            # Reset client count
             with self.client_lock:
                 self.connected_clients = 0
 
-            # Final garbage collection
             gc.collect()
 
             print("GenICam service cleanup completed")
@@ -1581,14 +1575,17 @@ class TensorRTGenICamDetector:
             if not self.frame_queue.empty():
                 frame = self.frame_queue.get()
                 with self.detection_lock:
-                    frame_with_detections = self.latest_detections if self.latest_detections is not None else frame
+                    frame_with_detections = (
+                        self.latest_detections
+                        if self.latest_detections is not None
+                        else frame
+                    )
 
                 # Convert BGR to RGB for proper color display
                 frame_rgb = cv2.cvtColor(frame_with_detections, cv2.COLOR_BGR2RGB)
                 cv2.imshow(self.inference_window, frame_rgb)
         except Exception as e:
             print(f"Display error: {e}")
-
 
     def run_gui_mode(self):
         """Original GUI mode with OpenCV display"""
