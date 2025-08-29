@@ -1072,6 +1072,45 @@ class TensorRTGenICamDetector:
         scale = min(width_scale, height_scale, 1.0)
         return int(width * scale), int(height * scale)
 
+    # def process_frame(self, buffer):
+    #     """Process frame from GenICam camera to RGB format"""
+    #     component = buffer.payload.components[0]
+    #     width, height, data = component.width, component.height, component.data
+
+    #     # Handle different pixel formats
+    #     if self.pixel_format == "RGB8":
+    #         image = data.reshape((height, width, 3))
+    #         if self.vendor.lower().startswith("allied vision"):
+    #             image = image[..., ::-1]  # Swap channels for Allied Vision
+    #     elif self.pixel_format == "BGR8":
+    #         bgr = data.reshape((height, width, 3))
+    #         image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    #     elif self.pixel_format == "Mono8":
+    #         mono = data.reshape((height, width))
+    #         image = cv2.cvtColor(mono, cv2.COLOR_GRAY2RGB)
+    #     elif self.pixel_format.startswith("Bayer"):
+    #         raw = data.reshape((height, width))
+    #         if "RG" in self.pixel_format:
+    #             image = cv2.cvtColor(raw, cv2.COLOR_BayerRG2RGB)
+    #         elif "GR" in self.pixel_format:
+    #             image = cv2.cvtColor(raw, cv2.COLOR_BayerGR2RGB)
+    #         elif "BG" in self.pixel_format:
+    #             image = cv2.cvtColor(raw, cv2.COLOR_BayerBG2RGB)
+    #         elif "GB" in self.pixel_format:
+    #             image = cv2.cvtColor(raw, cv2.COLOR_BayerGB2RGB)
+    #         else:
+    #             image = cv2.cvtColor(raw, cv2.COLOR_GRAY2RGB)
+    #     else:
+    #         print(f"[Warning] Unknown format {self.pixel_format}, fallback gray")
+    #         gray = data.reshape((height, width))
+    #         image = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+
+    #     if image.dtype != np.uint8:
+    #         image = image.astype(np.uint8)
+    #     if not image.flags.writeable:
+    #         image = image.copy()
+    #     return image
+
     def process_frame(self, buffer):
         """Process frame from GenICam camera to RGB format"""
         component = buffer.payload.components[0]
@@ -1082,6 +1121,7 @@ class TensorRTGenICamDetector:
             image = data.reshape((height, width, 3))
             if self.vendor.lower().startswith("allied vision"):
                 image = image[..., ::-1]  # Swap channels for Allied Vision
+                
         elif self.pixel_format == "BGR8":
             bgr = data.reshape((height, width, 3))
             image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -1110,6 +1150,7 @@ class TensorRTGenICamDetector:
         if not image.flags.writeable:
             image = image.copy()
         return image
+
 
     def connect_camera(self, camera_index=None):
         """Connect to specific camera with proper resource management"""
@@ -1211,13 +1252,13 @@ class TensorRTGenICamDetector:
                 try:
                     with self.ia.fetch(timeout=2000) as buffer:
                         # Process frame to RGB format
-                        frame = self.process_frame(buffer)
+                        frame_rgb = self.process_frame(buffer)
 
                         # Convert RGB to BGR for OpenCV processing
-                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
+                        # frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                        
                         current_time = time.perf_counter()
-
+                        
                         # Update frame counting
                         frame_count += 1
                         if self.camera_start_time is None:
@@ -1226,10 +1267,10 @@ class TensorRTGenICamDetector:
                         # Send to inference queue with letterboxing
                         if self.inference_running and not self.inference_queue.full():
                             # Letterbox to 640x640
-                            h, w = frame_bgr.shape[:2]
+                            h, w = frame_rgb.shape[:2]
                             scale = min(640 / h, 640 / w)
                             nw, nh = int(round(w * scale)), int(round(h * scale))
-                            resized = cv2.resize(frame_bgr, (nw, nh))
+                            resized = cv2.resize(frame_rgb, (nw, nh))
                             canvas = np.full((640, 640, 3), 114, dtype=np.uint8)
                             top, left = (640 - nh) // 2, (640 - nw) // 2
                             canvas[top : top + nh, left : left + nw] = resized
@@ -1240,6 +1281,7 @@ class TensorRTGenICamDetector:
                                 pass
 
                         # Send to display queue
+                        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
                         if not self.frame_queue.full():
                             self.frame_queue.put(frame_bgr)
 
@@ -1532,6 +1574,21 @@ class TensorRTGenICamDetector:
             self.run_websocket_mode()
         else:
             self.run_gui_mode()
+
+    def display_frames(self):
+        """Display frames with inference results"""
+        try:
+            if not self.frame_queue.empty():
+                frame = self.frame_queue.get()
+                with self.detection_lock:
+                    frame_with_detections = self.latest_detections if self.latest_detections is not None else frame
+
+                # Convert BGR to RGB for proper color display
+                frame_rgb = cv2.cvtColor(frame_with_detections, cv2.COLOR_BGR2RGB)
+                cv2.imshow(self.inference_window, frame_rgb)
+        except Exception as e:
+            print(f"Display error: {e}")
+
 
     def run_gui_mode(self):
         """Original GUI mode with OpenCV display"""

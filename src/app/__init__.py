@@ -303,7 +303,7 @@ def stop_genicam_service():
         if _genicam_service:
             _genicam_service.stop_service()
             _genicam_service.stop()
-            _genicam_service.cleanup_all()
+           # _genicam_service.cleanup_all()
             
 
         if _genicam_thread and _genicam_thread.is_alive():
