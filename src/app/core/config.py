@@ -42,6 +42,9 @@ class AppConfig:
             "cti_file_location": self.cti_file_location,
         }
 
+    def get_cti(self):
+        return self.cti_file_location
+
     def get_modlel_path(self):
         if self.model_selection == "raw_dough":
             return os.path.join(
