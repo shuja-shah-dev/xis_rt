@@ -60,7 +60,7 @@ def start_normal_stream():
 
         if config["input_type"] == "camera":
             print("Attempting to start normal camera stream...")
-            success = genicam_service.start_genicam_service_async(model_path, cti_file_path)
+            success = start_genicam_service_async(model_path, cti_file_path)
 
             if success:
                 result = "Normal camera stream started successfully"
