@@ -949,35 +949,26 @@ class TensorRTGenICamDetector:
         }
 
     def run_normal(self):
-        """Run in pure WebSocket mode without any GUI components"""
+        """Non-blocking version - just prepares the service"""
         try:
-            print("Starting TensorRT GenICam Detection System (WebSocket Mode)")
-
+            print("Starting GenICam service (non-blocking)")
+            
             if not self.websocket_mode:
                 self.websocket_mode = True
-
-            if len(self.h.device_info_list) > 0:
+            
+            # Just check if cameras are available - don't start anything yet
+            if self.h and len(self.h.device_info_list) > 0:
                 print(f"Found {len(self.h.device_info_list)} camera(s)")
-                self.run_websocket_mode()
-
+                return True
             else:
                 print("No cameras found")
-            print("WebSocket mode ready - waiting for commands...")
-            # Keep main thread alive without blocking
-            try:
-                while True:
-                    time.sleep(1)
-                    # Check if we should exit (you can add a shutdown flag here)
-            except KeyboardInterrupt:
-                print("Interrupted by user")
-            finally:
-                self.cleanup_resources()
+                return False
+                
         except Exception as e:
             print(f"Error in run_normal: {str(e)}")
             import traceback
-
             traceback.print_exc()
-
+            return False
     def stop(self):
         """Stop streaming with comprehensive cleanup"""
         try:
