@@ -1587,6 +1587,59 @@ class TensorRTGenICamDetector:
         except Exception as e:
             print(f"Display error: {e}")
 
+    def stop_streaming_completely(self):
+        """Completely stop streaming and clean up all resources"""
+        try:
+            print("Initiating complete stream stop...")
+
+            self.is_streaming = False
+            self.inference_running = False
+            self.service_running = False
+            self.service_stop_event.set()
+
+            if self.ia:
+                try:
+                    if hasattr(self.ia, "is_streaming") and self.ia.is_streaming():
+                        self.ia.stop()
+                except Exception as e:
+                    print(f"Error stopping camera: {e}")
+
+            threads_to_join = []
+
+            if (
+                hasattr(self, "inference_thread")
+                and self.inference_thread
+                and self.inference_thread.is_alive()
+            ):
+                threads_to_join.append(self.inference_thread)
+
+            if (
+                hasattr(self, "camera_thread")
+                and self.camera_thread
+                and self.camera_thread.is_alive()
+            ):
+                threads_to_join.append(self.camera_thread)
+
+            for thread in threads_to_join:
+                thread.join(timeout=2.0)
+                if thread.is_alive():
+                    print(f"Warning: {thread.name} did not stop cleanly")
+
+            self._clear_queues_safe()
+            self._cleanup_camera_safe()
+
+            self._cleanup_cuda_safe()
+
+            self.latest_detections = None
+            self.ia = None
+
+            print("Streaming completely stopped and resources cleaned up")
+            return True
+
+        except Exception as e:
+            print(f"Error during complete stop: {e}")
+            return False
+
     def run_gui_mode(self):
         """Original GUI mode with OpenCV display"""
         print("Starting TensorRT GenICam Detection System (GUI Mode)")
@@ -1637,6 +1690,7 @@ class TensorRTGenICamDetector:
 
 
 def _sigint_handler(sig, frame):
+
     print("Ctrl-C received, shutting down...")
     global app
     try:

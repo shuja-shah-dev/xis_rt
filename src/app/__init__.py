@@ -297,8 +297,6 @@ def start_genicam_service_async(model_path, cti_file_path):
 def stop_genicam_service():
     global _genicam_thread, _genicam_lock
 
-    print("Stopping GenICam service...")
-
     service_ref = None
     thread_ref = None
 
@@ -307,7 +305,7 @@ def stop_genicam_service():
         thread_ref = _genicam_thread
 
     if service_ref:
-        service_ref.stop_service()
+        service_ref.stop_streaming_completely()
     if thread_ref and thread_ref.is_alive():
         print("Service thread will finish cleanup in background")
 
