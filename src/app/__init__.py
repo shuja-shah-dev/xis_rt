@@ -302,6 +302,8 @@ def stop_genicam_service():
     with _genicam_lock:
         if _genicam_service:
             _genicam_service.stop_service()
+            _genicam_service.stop()
+            
 
         if _genicam_thread and _genicam_thread.is_alive():
             _genicam_thread.join(timeout=5.0)
