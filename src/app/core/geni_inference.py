@@ -473,6 +473,7 @@ class TensorRTGenICamDetector:
         self.h = None
         self.ia = None
         self.vendor = None
+        self.cti_file_path = cti_file_path
         self.pixel_format = None
         self.original_pixel_format = None
         try:
@@ -571,25 +572,6 @@ class TensorRTGenICamDetector:
 
     # New methods for
 
-    def complete_initialization(self, model_path, cti_file_path):
-        """Complete initialization with provided paths"""
-        try:
-            print(
-                f"Completing initialization with model: {model_path}, CTI: {cti_file_path}"
-            )
-
-            if self.h is None:
-                self.initialize_camera(cti_file_path)
-
-            if self.detector is None:
-                self.initialize_tensorrt_with_path(model_path)
-
-            print("GenICam service initialization completed successfully")
-            return True
-
-        except Exception as e:
-            print(f"Failed to complete initialization: {e}")
-            return False
 
     def initialize_tensorrt_with_path(self, model_path):
         """Initialize TensorRT with specific model path"""
@@ -601,15 +583,18 @@ class TensorRTGenICamDetector:
 
             t0 = time.perf_counter()
 
+            # Push context for initialization
             if self.ctx:
                 self.ctx.push()
 
-            self.detector = TensorRTDetector(model_path, max_detections=1000)
-            load_ms = (time.perf_counter() - t0) * 1e3
-            print(f"TensorRT engine loaded in {load_ms:.1f} ms")
-
-            if self.ctx:
-                self.ctx.pop()
+            try:
+                self.detector = TensorRTDetector(model_path, max_detections=1000)
+                load_ms = (time.perf_counter() - t0) * 1e3
+                print(f"TensorRT engine loaded in {load_ms:.1f} ms")
+            finally:
+                # Always pop after initialization
+                if self.ctx:
+                    self.ctx.pop()
 
             return True
 
@@ -747,8 +732,12 @@ class TensorRTGenICamDetector:
             print(f"Error in CUDA cleanup: {e}")
 
     def initialize_camera(self, cti_file_path=None):
-        """Initialize GenICam camera using Harvesters"""
+        """Initialize GenICam camera using Harvesters - store CTI path for reuse"""
         try:
+            # Store CTI path for later use
+            if cti_file_path:
+                self.cti_file_path = cti_file_path
+            
             if cti_file_path is None:
                 if self.websocket_mode:
                     print("No CTI file provided - camera will be initialized later")
@@ -763,6 +752,7 @@ class TensorRTGenICamDetector:
                     root.destroy()
                     if not cti_file_path:
                         raise RuntimeError("No CTI file selected")
+                    self.cti_file_path = cti_file_path
                 else:
                     raise RuntimeError("No CTI file provided and GUI not available")
 
@@ -771,8 +761,13 @@ class TensorRTGenICamDetector:
 
             print(f"Using CTI file: {cti_file_path}")
 
-            self.h = Harvester()
-            self.h.add_file(cti_file_path)
+            if self.h is None:
+                self.h = Harvester()
+            
+            # Add CTI file only if not already added
+            if cti_file_path not in self.h.files:
+                self.h.add_file(cti_file_path)
+            
             self.h.update()
 
             if len(self.h.device_info_list) == 0:
@@ -784,6 +779,20 @@ class TensorRTGenICamDetector:
 
         except Exception as e:
             raise RuntimeError(f"Failed to initialize camera: {e}")
+
+
+    def _force_camera_release(self):
+        """Force release of camera resources - simplified version"""
+        try:
+            print("Force releasing camera resources...")
+            
+            # Just update the device list to refresh availability
+            if self.h:
+                self.h.update()
+                time.sleep(0.5)
+                
+        except Exception as e:
+            print(f"Error in force camera release: {e}")
 
     def select_camera_interactive(self):
         """Interactive camera selection"""
@@ -918,9 +927,8 @@ class TensorRTGenICamDetector:
             print("TensorRT not initialized.")
             return
 
-        self.ctx.push()
         print("TensorRT inference worker running")
-
+        
         try:
             last_cap_ts = None
             while self.inference_running:
@@ -928,17 +936,23 @@ class TensorRTGenICamDetector:
                     try:
                         frame, cap_ts = self.inference_queue.get_nowait()
                     except queue.Empty:
-                        time.sleep(0.001)  # Small sleep to prevent busy waiting
+                        time.sleep(0.001)
                         continue
 
-                    # Run TensorRT inference
-                    t0 = time.time()
-                    detections = self.detector.detect_raw_frame(
-                        frame, score_threshold=self.current_confidence_threshold
-                    )
-                    latency = (time.time() - t0) * 1000
+                    # Push context only for inference
+                    self.ctx.push()
+                    try:
+                        # Run TensorRT inference
+                        t0 = time.time()
+                        detections = self.detector.detect_raw_frame(
+                            frame, score_threshold=self.current_confidence_threshold
+                        )
+                        latency = (time.time() - t0) * 1000
+                    finally:
+                        # Always pop context after inference
+                        self.ctx.pop()
 
-                    # Visualize detections
+                    # Visualize detections (no CUDA needed)
                     vis = visualize_detections_img(frame, detections)
 
                     # Calculate display FPS
@@ -982,7 +996,7 @@ class TensorRTGenICamDetector:
                     with self.detection_lock:
                         self.latest_detections = vis
 
-                    # Emit frame via WebSocket
+                    # Emit frame via WebSocket (context already popped)
                     self.emit_websocket_frame(vis, metadata)
 
                     self.inference_queue.task_done()
@@ -990,7 +1004,6 @@ class TensorRTGenICamDetector:
                 except Exception as e:
                     print(f"Inference worker error: {e}")
         finally:
-            self.ctx.pop()
             print("TensorRT inference worker stopped")
 
     def debug_websocket_status(self):
@@ -1247,22 +1260,78 @@ class TensorRTGenICamDetector:
             image = image.copy()
         return image
 
-    
+    def _cleanup_camera_completely(self):
+        """Complete camera cleanup with timeout handling"""
+        try:
+            if self.ia:
+                try:
+                    print("Stopping camera stream...")
+                    # Force stop streaming without waiting
+                    try:
+                        if hasattr(self.ia, 'is_streaming') and self.ia.is_streaming():
+                            self.ia.stop()
+                            print("Camera stream stopped")
+                    except Exception as e:
+                        print(f"Error stopping stream (non-fatal): {e}")
+                    
+                    # Try destroy with timeout using threading
+                    print("Destroying camera interface...")
+                    destroy_completed = threading.Event()
+                    
+                    def destroy_camera():
+                        try:
+                            self.ia.destroy()
+                            destroy_completed.set()
+                        except Exception as e:
+                            print(f"Error in destroy thread: {e}")
+                            destroy_completed.set()
+                    
+                    destroy_thread = threading.Thread(target=destroy_camera, daemon=True)
+                    destroy_thread.start()
+                    
+                    # Wait max 2 seconds for destroy
+                    if destroy_completed.wait(timeout=2.0):
+                        print("Camera interface destroyed")
+                    else:
+                        print("Warning: Camera destroy timed out - forcing cleanup")
+                    
+                except Exception as e:
+                    print(f"Error destroying camera interface: {e}")
+                finally:
+                    self.ia = None
+
+            # Update harvester device list
+            if self.h:
+                try:
+                    self.h.update()
+                    print(f"Harvester updated. Found {len(self.h.device_info_list)} cameras")
+                except Exception as e:
+                    print(f"Error updating harvester: {e}")
+
+            # Reset camera-related state
+            self.vendor = None
+            self.pixel_format = None
+            self.original_pixel_format = None
+
+        except Exception as e:
+            print(f"Error in camera cleanup: {e}")
+
 
     def camera_capture_worker(self):
-        """Camera capture worker thread"""
+        """Camera capture worker thread with proper exit handling"""
         try:
             self.ia.start()
             frame_count = 0
 
             while self.is_streaming:
                 try:
-                    with self.ia.fetch(timeout=2000) as buffer:
+                    # Use shorter timeout and check streaming flag
+                    with self.ia.fetch(timeout=500) as buffer:  # Reduced timeout to 500ms
+                        if not self.is_streaming:  # Check again after fetch
+                            break
+                            
                         # Process frame to RGB format
                         frame_rgb = self.process_frame(buffer)
-
-                        # Convert RGB to BGR for OpenCV processing
-                        # frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
                         current_time = time.perf_counter()
 
@@ -1297,11 +1366,18 @@ class TensorRTGenICamDetector:
 
                 except Exception as e:
                     if self.is_streaming:
-                        print(f"Frame capture error: {e}")
+                        # Only log errors if we're supposed to be streaming
+                        if "timeout" not in str(e).lower():
+                            print(f"Frame capture error: {e}")
                         time.sleep(0.01)
+                    else:
+                        # Exit cleanly if streaming stopped
+                        break
 
         except Exception as e:
             print(f"Camera worker error: {e}")
+        finally:
+            print("Camera capture worker exiting")
 
     def update_confidence_threshold(self, threshold):
         """Update confidence threshold via WebSocket command"""
@@ -1445,28 +1521,288 @@ class TensorRTGenICamDetector:
         except Exception as e:
             print(f"Error during cleanup: {e}")
 
-
-    def cleanup_all(self):
-        """Comprehensive cleanup of all resources"""
-        print("Starting GenICam service cleanup...")
+    def stop_streaming_completely(self):
+        """Reset to lazy_init state without destroying resources"""
         try:
-            self.stop_streaming_completely()
-            
-            # Additional cleanup
-            if hasattr(self, 'resource_manager') and self.resource_manager:
-                self.resource_manager.cleanup_all()
-            
-            with self.client_lock:
-                self.connected_clients = 0
+            print("Resetting to initial state...")
 
-            import gc
+            # Set ALL streaming flags to False
+            self.is_streaming = False
+            self.streaming_active = False
+            self.inference_running = False  
+            self.inference_active = False
+            self.service_running = False
+            self.service_stop_event.set()
+            self.shutdown_event.set()
+
+            # Stop camera stream only (don't destroy)
+            if self.ia:
+                try:
+                    if hasattr(self.ia, 'is_streaming') and self.ia.is_streaming():
+                        self.ia.stop()
+                        print("Camera stream stopped")
+                except Exception as e:
+                    print(f"Error stopping stream: {e}")
+                
+                # Just release the reference without destroy
+                self.ia = None
+                print("Camera reference released (not destroyed)")
+
+            # Clear queues immediately
+            self._clear_all_queues()
+
+            # Wait for threads with short timeout
+            threads_to_cleanup = []
+            
+            if hasattr(self, 'inference_thread') and self.inference_thread and self.inference_thread.is_alive():
+                threads_to_cleanup.append(('inference_thread', self.inference_thread))
+                
+            if hasattr(self, 'camera_thread') and self.camera_thread and self.camera_thread.is_alive():
+                threads_to_cleanup.append(('camera_thread', self.camera_thread))
+
+            for thread_name, thread in threads_to_cleanup:
+                try:
+                    print(f"Waiting for {thread_name} to stop...")
+                    thread.join(timeout=1.0)
+                    if thread.is_alive():
+                        print(f"Warning: {thread_name} did not stop cleanly")
+                    else:
+                        print(f"{thread_name} stopped")
+                except Exception as e:
+                    print(f"Error stopping {thread_name}: {e}")
+
+            # Clear CUDA context reference (don't destroy)
+            if self.ctx:
+                try:
+                    # Pop if it's current
+                    try:
+                        current = cuda.Context.get_current()
+                        if current and current == self.ctx:
+                            self.ctx.pop()
+                            print("CUDA context popped")
+                    except cuda.LogicError:
+                        pass
+                except Exception as e:
+                    print(f"Error with CUDA context: {e}")
+                
+                # Keep context for reuse
+                # self.ctx = None  # DON'T set to None - keep for reuse
+
+            # Reset state but keep Harvester and detector
+            self._reset_streaming_state()
+
+            # Update harvester device list
+            if self.h:
+                try:
+                    self.h.update()
+                    print(f"Device list updated. Found {len(self.h.device_info_list)} cameras")
+                except Exception as e:
+                    print(f"Error updating device list: {e}")
+
             gc.collect()
-
-            print("GenICam service cleanup completed")
+            print("Reset to initial state complete")
+            return True
 
         except Exception as e:
-            print(f"Error during GenICam cleanup: {e}")
+            print(f"Error during reset: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
+
+    def _reset_streaming_state(self):
+        """Reset only streaming-related state, keep core components"""
+        try:
+            # Reset streaming states
+            self.is_streaming = False
+            self.streaming_active = False
+            self.inference_running = False
+            self.inference_active = False
+            self.service_running = False
+            
+            # Clear events
+            self.service_stop_event.clear()
+            self.shutdown_event.clear()
+            
+            # Reset threads
+            self.inference_thread = None
+            self.camera_thread = None
+            
+            # Reset detection data
+            self.latest_detections = None
+            
+            # Reset camera state (but keep harvester)
+            self.vendor = None
+            self.pixel_format = None
+            self.original_pixel_format = None
+            
+            # Reset performance counters
+            self.camera_frame_count = 0
+            self.camera_start_time = None
+            if hasattr(self, 'ts_window'):
+                self.ts_window.clear()
+            if hasattr(self, 'lat_window'):
+                self.lat_window.clear()
+            
+            print("Streaming state reset")
+            
+        except Exception as e:
+            print(f"Error resetting state: {e}")
+
+
+    def connect_camera(self, camera_index=None):
+        """Connect to camera - reuse existing Harvester"""
+        try:
+            # If camera reference exists, just release it (don't destroy)
+            if self.ia is not None:
+                print("Releasing previous camera reference...")
+                try:
+                    if hasattr(self.ia, 'is_streaming') and self.ia.is_streaming():
+                        self.ia.stop()
+                        time.sleep(0.2)
+                except Exception as e:
+                    print(f"Error stopping stream: {e}")
+                
+                self.ia = None  # Just release reference
+                time.sleep(0.5)  # Let system release resources
+
+            # Update device list
+            if self.h:
+                self.h.update()
+                print(f"Device list updated. Found {len(self.h.device_info_list)} cameras")
+            else:
+                raise RuntimeError("Harvester not initialized")
+
+            if len(self.h.device_info_list) == 0:
+                raise ValueError("No cameras available")
+
+            if camera_index is None:
+                camera_index = 0 if self.websocket_mode else self.select_camera_interactive()
+                if camera_index is None:
+                    raise ValueError("No camera selected")
+
+            if camera_index >= len(self.h.device_info_list):
+                raise ValueError(f"Camera index {camera_index} not available")
+
+            print(f"Connecting to camera {camera_index}...")
+            
+            # Simple connection with minimal retry
+            for attempt in range(2):
+                try:
+                    self.ia = self.h.create(camera_index)
+                    if self.ia:
+                        print(f"Camera {camera_index} connected")
+                        break
+                except Exception as e:
+                    if "in use" in str(e).lower() and attempt == 0:
+                        print("Camera may be in use, waiting 2s...")
+                        time.sleep(2.0)
+                        self.h.update()
+                    else:
+                        raise
+
+            if not self.ia:
+                raise RuntimeError(f"Failed to connect to camera {camera_index}")
+
+            # Configure camera
+            node_map = self.ia.remote_device.node_map
+            self.vendor = self.h.device_info_list[camera_index].vendor
+
+            self.original_pixel_format = node_map.PixelFormat.value
+            print(f"Original pixel format: {self.original_pixel_format}")
+
+            # Set resolution and format
+            max_width = node_map.Width.max
+            max_height = node_map.Height.max
+            node_map.Width.value = max_width
+            node_map.Height.value = max_height
+
+            available_formats = list(node_map.PixelFormat.symbolics)
+            format_priority = ["RGB8", "BGR8", "BayerRG8", "BayerGR8", "BayerBG8", "BayerGB8", "Mono8"]
+            
+            for fmt in format_priority:
+                if fmt in available_formats:
+                    try:
+                        node_map.PixelFormat.value = fmt
+                        self.pixel_format = fmt
+                        break
+                    except:
+                        continue
+            
+            if not self.pixel_format:
+                self.pixel_format = node_map.PixelFormat.value
+
+            print(f"Connected: {self.vendor}, {node_map.Width.value}x{node_map.Height.value}, {self.pixel_format}")
+            
+            self.display_width, self.display_height = self._calculate_display_size(
+                node_map.Width.value, node_map.Height.value
+            )
+            
+            return True
+            
+        except Exception as e:
+            print(f"Failed to connect: {e}")
+            self.ia = None
+            raise
+
+
+    def complete_initialization(self, model_path, cti_file_path):
+        """Complete initialization or reinitialize with paths"""
+        try:
+            print(f"Initializing with model: {model_path}, CTI: {cti_file_path}")
+
+            # Initialize Harvester if needed or if CTI path changed
+            if self.h is None or self.cti_file_path != cti_file_path:
+                self.initialize_camera(cti_file_path)
+
+            # Initialize TensorRT if needed
+            if self.detector is None:
+                self.initialize_tensorrt_with_path(model_path)
+
+            print("Initialization completed successfully")
+            return True
+
+        except Exception as e:
+            print(f"Failed to complete initialization: {e}")
+            return False
+
+
+    def cleanup_all(self):
+        """Final cleanup when shutting down application"""
+        print("Final cleanup...")
+        try:
+            # Stop streaming without destroying
+            self.stop_streaming_completely()
+            
+            # Only destroy camera on final cleanup
+            if self.ia:
+                try:
+                    self.ia.destroy()
+                except:
+                    pass
+                self.ia = None
+            
+            # Reset harvester on final cleanup
+            if self.h:
+                try:
+                    self.h.reset()
+                except:
+                    pass
+                self.h = None
+            
+            # Destroy CUDA context on final cleanup
+            if self.ctx:
+                try:
+                    self.ctx.detach()
+                except:
+                    pass
+                self.ctx = None
+            
+            gc.collect()
+            print("Final cleanup completed")
+            
+        except Exception as e:
+            print(f"Error during final cleanup: {e}")
 
     def _check_memory_usage(self):
         """Simplified memory check without external monitor"""
@@ -1581,269 +1917,6 @@ class TensorRTGenICamDetector:
             return False
 
 
-    def connect_camera(self, camera_index=None):
-        """Connect to specific camera with resource lock handling - UPDATED"""
-        try:
-            # Clean up any existing connection more thoroughly
-            if self.ia is not None:
-                print("Disconnecting existing camera...")
-                try:
-                    if hasattr(self.ia, 'is_streaming') and self.ia.is_streaming():
-                        self.ia.stop()
-                        time.sleep(0.3)
-                    self.ia.destroy()
-                    time.sleep(0.5)  # Longer wait for resource release
-                    print("Previous camera disconnected")
-                except Exception as e:
-                    print(f"Error during camera disconnect: {e}")
-                finally:
-                    self.ia = None
-
-            # Force release any locked resources
-            self._force_camera_release()
-            
-            # Refresh camera list
-            self._refresh_camera_list()
-
-            if camera_index is None:
-                if self.websocket_mode:
-                    camera_index = 0
-                else:
-                    camera_index = self.select_camera_interactive()
-                    if camera_index is None:
-                        raise ValueError("No camera selected")
-
-            if camera_index >= len(self.h.device_info_list):
-                raise ValueError(
-                    f"Camera index {camera_index} not available. Found {len(self.h.device_info_list)} cameras."
-                )
-
-            print(f"Connecting to camera {camera_index}...")
-            
-            # Enhanced retry mechanism for camera connection with resource lock handling
-            max_retries = 5  # Increased retries
-            retry_delays = [0.5, 1.0, 2.0, 3.0, 5.0]  # Progressive delays
-            
-            for attempt in range(max_retries):
-                try:
-                    print(f"Connection attempt {attempt + 1}/{max_retries}")
-                    
-                    # Try to create camera connection
-                    self.ia = self.h.create(camera_index)
-                    if self.ia:
-                        print(f"Camera {camera_index} connected successfully")
-                        break
-                    else:
-                        if attempt < max_retries - 1:
-                            delay = retry_delays[attempt]
-                            print(f"Camera creation failed, waiting {delay}s before retry...")
-                            time.sleep(delay)
-                            
-                            # Try force release again before next attempt
-                            if attempt >= 2:  # After 2 failed attempts
-                                self._force_camera_release()
-                                self._refresh_camera_list()
-                                
-                except Exception as e:
-                    error_msg = str(e)
-                    print(f"Camera connection attempt {attempt + 1} failed: {error_msg}")
-                    
-                    if "already in use" in error_msg.lower() or "resource in use" in error_msg.lower():
-                        if attempt < max_retries - 1:
-                            delay = retry_delays[attempt]
-                            print(f"Camera resource locked. Waiting {delay}s before retry...")
-                            time.sleep(delay)
-                            
-                            # Force release and refresh after resource lock error
-                            self._force_camera_release()
-                            self._refresh_camera_list()
-                        else:
-                            # Last attempt failed due to resource lock
-                            raise RuntimeError(
-                                f"Camera {camera_index} is locked by another process. "
-                                f"Please close any other applications using the camera or restart the camera."
-                            )
-                    else:
-                        # Different error - retry with shorter delay
-                        if attempt < max_retries - 1:
-                            print(f"Retrying in 0.5s...")
-                            time.sleep(0.5)
-                        else:
-                            raise
-            
-            if not self.ia:
-                raise RuntimeError(f"Failed to create camera instance for index {camera_index} after {max_retries} attempts")
-
-            # Configure camera
-            node_map = self.ia.remote_device.node_map
-            self.vendor = self.h.device_info_list[camera_index].vendor
-
-            self.original_pixel_format = node_map.PixelFormat.value
-            print(f"Original pixel format: {self.original_pixel_format}")
-
-            # Get maximum resolution
-            max_width = node_map.Width.max
-            max_height = node_map.Height.max
-            node_map.Width.value = max_width
-            node_map.Height.value = max_height
-
-            # Set best available format
-            available_formats = list(node_map.PixelFormat.symbolics)
-            format_priority = [
-                "RGB8", "BGR8", "BayerRG8", "BayerGR8", "BayerBG8", "BayerGB8", "Mono8"
-            ]
-            selected_format = None
-            for fmt in format_priority:
-                if fmt in available_formats:
-                    try:
-                        node_map.PixelFormat.value = fmt
-                        selected_format = fmt
-                        break
-                    except:
-                        continue
-            
-            if not selected_format:
-                selected_format = node_map.PixelFormat.value
-            self.pixel_format = selected_format
-
-            final_width = node_map.Width.value
-            final_height = node_map.Height.value
-
-            print(f"Connected to {self.vendor} camera")
-            print(f"Resolution: {final_width}x{final_height}, Format: {self.pixel_format}")
-
-            # Calculate display size
-            self.display_width, self.display_height = self._calculate_display_size(
-                final_width, final_height
-            )
-            print(f"Display size: {self.display_width}x{self.display_height}")
-            return True
-            
-        except Exception as e:
-            print(f"Failed to connect to camera: {e}")
-            if self.ia:
-                try:
-                    self.ia.destroy()
-                except:
-                    pass
-                self.ia = None
-            raise
-
-
-    def _cleanup_camera_completely(self):
-        """Complete camera cleanup - ENHANCED for resource lock prevention"""
-        try:
-            if self.ia:
-                try:
-                    print("Destroying camera interface...")
-                    # Make sure camera is stopped
-                    if hasattr(self.ia, 'is_streaming') and self.ia.is_streaming():
-                        self.ia.stop()
-                        time.sleep(0.2)
-                    
-                    # Destroy the interface
-                    self.ia.destroy()
-                    print("Camera interface destroyed")
-                    
-                    # Extra wait to ensure resource is fully released
-                    time.sleep(0.5)
-                    
-                except Exception as e:
-                    print(f"Error destroying camera interface: {e}")
-                finally:
-                    self.ia = None
-
-            # Force release any remaining resources
-            self._force_camera_release()
-
-            # Keep harvester alive for reuse - don't reset it
-            if self.h:
-                try:
-                    # Refresh the device list to clear any stale connections
-                    self.h.update()
-                    print(f"Harvester available with {len(self.h.device_info_list)} cameras")
-                except Exception as e:
-                    print(f"Error checking harvester status: {e}")
-
-            # Reset camera-related state
-            self.vendor = None
-            self.pixel_format = None
-            self.original_pixel_format = None
-
-        except Exception as e:
-            print(f"Error in camera cleanup: {e}")
-
-
-    def stop_streaming_completely(self):
-        """Completely stop streaming and clean up all resources - ENHANCED VERSION"""
-        try:
-            print("Initiating complete stream stop...")
-
-            # Set ALL streaming flags to False
-            self.is_streaming = False
-            self.streaming_active = False
-            self.inference_running = False  
-            self.inference_active = False
-            self.service_running = False
-            self.service_stop_event.set()
-            self.shutdown_event.set()
-
-            # Stop camera properly BEFORE thread cleanup
-            if self.ia:
-                try:
-                    print("Stopping camera acquisition...")
-                    if hasattr(self.ia, 'is_streaming') and self.ia.is_streaming():
-                        self.ia.stop()
-                        time.sleep(0.3)  # Increased wait time
-                        print("Camera acquisition stopped")
-                except Exception as e:
-                    print(f"Error stopping camera: {e}")
-
-            # Wait for threads with proper timeout and cleanup
-            threads_to_cleanup = []
-            
-            if hasattr(self, 'inference_thread') and self.inference_thread and self.inference_thread.is_alive():
-                threads_to_cleanup.append(('inference_thread', self.inference_thread))
-                
-            if hasattr(self, 'camera_thread') and self.camera_thread and self.camera_thread.is_alive():
-                threads_to_cleanup.append(('camera_thread', self.camera_thread))
-
-            for thread_name, thread in threads_to_cleanup:
-                try:
-                    print(f"Waiting for {thread_name} to stop...")
-                    thread.join(timeout=3.0)  # Increased timeout for proper shutdown
-                    if thread.is_alive():
-                        print(f"Warning: {thread_name} did not stop cleanly within timeout")
-                    else:
-                        print(f"{thread_name} stopped successfully")
-                except Exception as e:
-                    print(f"Error stopping {thread_name}: {e}")
-
-            # Clear all queues properly
-            self._clear_all_queues()
-
-            # Cleanup camera resources completely with enhanced resource release
-            self._cleanup_camera_completely()
-
-            # Cleanup CUDA context properly  
-            self._cleanup_cuda_completely()
-
-            # Reset all state variables
-            self._reset_all_state()
-
-            # Force garbage collection
-            import gc
-            gc.collect()
-
-            print("Streaming completely stopped and resources cleaned up")
-            return True
-
-        except Exception as e:
-            print(f"Error during complete stop: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-        
     def _clear_all_queues(self):
         """Clear all queues completely - FIXED for tuple deletion error"""
         try:
@@ -1885,31 +1958,34 @@ class TensorRTGenICamDetector:
             print(f"Error clearing queues: {e}")
 
     
-
     def _cleanup_cuda_completely(self):
-        """Complete CUDA cleanup - FIXED to prevent context stack errors"""
+        """Complete CUDA cleanup - properly manage context stack"""
         try:
             if self.ctx is not None:
                 try:
-                    # Pop context if it's current
+                    # Check if we have a current context
                     try:
-                        current_ctx = cuda.Context.get_current()
-                        if current_ctx == self.ctx:
+                        current = cuda.Context.get_current()
+                        # If our context is current, pop it
+                        if current and current == self.ctx:
                             self.ctx.pop()
-                            print("CUDA context popped")
+                            print("CUDA context popped from stack")
                     except cuda.LogicError:
-                        # Context not current, that's fine
+                        # No current context or not ours - that's fine
                         pass
-
-                    # Don't detach - just set to None
+                    
+                    # Synchronize and clear
+                    try:
+                        self.ctx.synchronize()
+                    except:
+                        pass
+                        
                     print("CUDA context cleared")
-
+                    
                 except Exception as e:
                     print(f"Error cleaning CUDA context: {e}")
                 finally:
                     self.ctx = None
-
-            # Don't recreate context here - let it be created when needed
 
         except Exception as e:
             print(f"Error in CUDA cleanup: {e}")
