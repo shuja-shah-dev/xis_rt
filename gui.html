@@ -420,8 +420,8 @@
 
         // Configuration - Update these URLs to match your Flask server
         const API_BASE = 'http://localhost:5000';  // Change this to your Flask server URL
-        const STATUS_URL = `${API_BASE}/mqtt/status`;
-        const PUBLISH_URL = `${API_BASE}/mqtt/publish_detection`;
+        const STATUS_URL = `${API_BASE}/api/status`;
+        const PUBLISH_URL = `${API_BASE}/api/publish_detection`;
 
         async function fetchMessages() {
             try {

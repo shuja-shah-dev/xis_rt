@@ -19,6 +19,12 @@ def get_genicam_service():
     return get_app_service()
 
 
+def get_video_service_rd():
+    from app import video_service
+
+    return video_service()
+
+
 def run_video_inference(config):
     """Run video inference - placeholder for video processing"""
     return f"Running video inference with model {config['model_selection']} on video {config['video_path']}"
@@ -36,145 +42,116 @@ def start_normal_stream():
             return jsonify({"status": "error", "message": message}), 400
 
         config = app_config.get_config()
-        # fall back model model  r"E:\Workspace\Eman\Vim X\models\largefp16.engine"
-        # fall back cti
 
-        model_path = app_config.get_modlel_path()
-        cti_file_path = app_config.get_cti()
+        if config["input_type"] == "video":
 
-        genicam_service = get_genicam_service()
-        if genicam_service is None:
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "Failed to initialize GenICam service",
-                    }
-                ),
-                500,
-            )
+            RUNTIME_CONFIG = {
+                "engine_path": config.get("VIDEO_ENGINE_PATH"),
+                "video_path": config.get("VIDEO_INPUT_PATH"),
+                "score_threshold": 0.4,
+                "score_class0": None,
+                "score_class1": None,
+                "nms_threshold": 0.5,
+                "mask_threshold": 0.4,
+                "canvas_size": 640,
+                "alpha": 0.3,
+                "min_inference_frames": 30,
+                "target_fps": 30.0,
+                "mqtt_topic": "detection/results",
+                "video_mode": config.get("VIDEO_MODE"),
+            }
+            if RUNTIME_CONFIG.get("video_mode") == "raw_dough":
+                video_service = get_video_service_rd()
+                if video_service.initialize_from_config(RUNTIME_CONFIG):
+                    if video_service.start_processing():
+                        return (
+                            jsonify(
+                                {
+                                    "status": "success",
+                                    "message": "Video processing started",
+                                }
+                            ),
+                            200,
+                        )
+                    else:
+                        return (
+                            jsonify(
+                                {
+                                    "status": "error",
+                                    "message": "Could not start processing",
+                                }
+                            ),
+                            500,
+                        )
+                else:
+                    return (
+                        jsonify(
+                            {"status": "error", "message": "Initialization failed"}
+                        ),
+                        500,
+                    )
+            elif RUNTIME_CONFIG.get("video_mode") == "baked_baguette":
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Initialization failed, raw_dough is not defined yet",
+                        }
+                    ),
+                    400,
+                )
 
-        if genicam_service.app_config is None:
-            print("Warning: app_config still None, setting it now...")
-            genicam_service.set_app_config(app_config)
-
-        if config["input_type"] == "camera":
-            print("Attempting to start normal camera stream...")
-            success = start_genicam_service_async(model_path, cti_file_path)
-
-            if success:
-                result = "Normal camera stream started successfully"
-                status_code = 200
-        
-            else:
-                result = "Failed to start normal camera stream"
-                status_code = 500
-                print(result)
         else:
-            result = "Normal stream only available for camera input"
-            status_code = 400
-            print(result)
 
-        return (
-            jsonify(
-                {
-                    "status": "success" if status_code == 200 else "error",
-                    "message": result,
-                    "service_status": genicam_service.get_status(),
-                }
-            ),
-            status_code,
-        )
+            model_path = app_config.get_modlel_path()
+            cti_file_path = app_config.get_cti()
 
-    except Exception as e:
-        error_msg = f"Failed to start normal stream: {str(e)}"
-        print(error_msg)
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": error_msg}), 500
+            genicam_service = get_genicam_service()
+            if genicam_service is None:
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Failed to initialize GenICam service",
+                        }
+                    ),
+                    500,
+                )
 
+            if genicam_service.app_config is None:
+                print("Warning: app_config still None, setting it now...")
+                genicam_service.set_app_config(app_config)
 
-@inference_bp.route("/stream/inference", methods=["POST"])
-def start_inference_stream():
-    """Start inference camera stream"""
-    try:
-        print("Starting inference stream request...")
-
-        # Validate configuration
-        is_valid, message = app_config.validate_config()
-        if not is_valid:
-            print(f"Configuration validation failed: {message}")
-            return jsonify({"status": "error", "message": message}), 400
-
-        config = app_config.get_config()
-        print(f"Config: {config}")
-
-        # Get service instance (this will set the app_config)
-        genicam_service = get_genicam_service()
-        if genicam_service is None:
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "Failed to initialize GenICam service",
-                    }
-                ),
-                500,
-            )
-
-        # Double-check that config is set
-        if genicam_service.app_config is None:
-            print("Warning: app_config still None, setting it now...")
-            genicam_service.set_app_config(app_config)
-
-        if config["input_type"] == "camera":
-            if config["model_selection"]:
-                engine_path = f"models/{config['model_selection']}.engine"
-                print(f"Looking for engine at: {engine_path}")
-
-                # Verify engine file exists
-                if not os.path.exists(engine_path):
-                    error_msg = f"Model engine not found: {engine_path}"
-                    print(error_msg)
-                    return jsonify({"status": "error", "message": error_msg}), 404
-
-                print("Attempting to start inference stream...")
-                success = genicam_service.run_with_inference(engine_path)
+            if config["input_type"] == "camera":
+                print("Attempting to start normal camera stream...")
+                success = start_genicam_service_async(model_path, cti_file_path)
 
                 if success:
-                    result = f"Inference stream started with model {config['model_selection']}"
+                    result = "Normal camera stream started successfully"
                     status_code = 200
-                    print(result)
+
                 else:
-                    result = f"Failed to start inference stream with model {config['model_selection']}"
+                    result = "Failed to start normal camera stream"
                     status_code = 500
                     print(result)
             else:
-                result = "No model selected for inference"
+                result = "Normal stream only available for camera input"
                 status_code = 400
                 print(result)
-        else:
-            # Video inference placeholder
-            result = run_video_inference(config)
-            status_code = 200
-            print(result)
 
-        return (
-            jsonify(
-                {
-                    "status": "success" if status_code == 200 else "error",
-                    "message": result,
-                    "service_status": (
-                        genicam_service.get_status()
-                        if config["input_type"] == "camera"
-                        else None
-                    ),
-                }
-            ),
-            status_code,
-        )
+            return (
+                jsonify(
+                    {
+                        "status": "success" if status_code == 200 else "error",
+                        "message": result,
+                        "service_status": genicam_service.get_status(),
+                    }
+                ),
+                status_code,
+            )
 
     except Exception as e:
-        error_msg = f"Failed to start inference stream: {str(e)}"
+        error_msg = f"Failed to start normal stream: {str(e)}"
         print(error_msg)
         traceback.print_exc()
         return jsonify({"status": "error", "message": error_msg}), 500
@@ -232,84 +209,42 @@ def stop_stream():
         return jsonify({"status": "error", "message": error_msg}), 500
 
 
-@inference_bp.route("/stream/status", methods=["GET"])
-def get_stream_status():
-    """Get current streaming status and metrics"""
+@inference_bp.route("/set_video", methods=["POST"])
+def set_src_video():
     try:
-        genicam_service = get_genicam_service()
-        if genicam_service is None:
+        if not request.is_json:
+            return jsonify({"error": "Request must be JSON"}), 400
+
+        data = request.get_json()
+
+        if not data or "video" not in data:
+            return jsonify({"error": "Missing 'video' field in request body"}), 400
+
+        video_value = data["video"]
+
+        allowed_videos = ["raw_dough", "baked_baguette"]
+        if video_value not in allowed_videos:
             return (
                 jsonify(
-                    {"status": "error", "message": "GenICam service not available"}
+                    {"error": f"Invalid video value. Must be one of: {allowed_videos}"}
                 ),
-                500,
+                400,
             )
 
-        status = genicam_service.get_status()
-
-        return jsonify({"status": "success", "data": status}), 200
-
-    except Exception as e:
-        error_msg = f"Error getting status: {str(e)}"
-        print(error_msg)
-        return jsonify({"status": "error", "message": error_msg}), 500
-
-
-@inference_bp.route("/stream/test", methods=["POST"])
-def test_service():
-    """Test service initialization"""
-    try:
-        print("Testing service initialization...")
-
-        # Test config first
-        is_valid, message = app_config.validate_config()
-        config = app_config.get_config()
-
-        print(f"Config validation: {is_valid}, message: {message}")
-        print(f"Config data: {config}")
-
-        genicam_service = get_genicam_service()
-        if genicam_service is None:
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "Failed to create GenICam service",
-                        "test_result": "FAILED",
-                    }
-                ),
-                500,
-            )
-
-        # Check if app config is properly set
-        service_has_config = genicam_service.app_config is not None
-        print(f"Service has app_config: {service_has_config}")
-
-        status = genicam_service.get_status()
+        app_config.set_video_config(video_value)
 
         return (
             jsonify(
                 {
-                    "status": "success",
-                    "message": "Service initialized successfully",
-                    "service_status": status,
-                    "config_validation": {"valid": is_valid, "message": message},
-                    "config_data": config,
-                    "service_has_config": service_has_config,
-                    "test_result": "PASSED",
+                    "message": "Video configuration updated successfully",
+                    "video": video_value,
                 }
             ),
             200,
         )
 
     except Exception as e:
-        error_msg = f"Service test failed: {str(e)}"
-        print(error_msg)
-        traceback.print_exc()
-        return (
-            jsonify({"status": "error", "message": error_msg, "test_result": "FAILED"}),
-            500,
-        )
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 
 def register_socketio_events(socketio_instance, genicam_service_instance=None):
