@@ -18,3 +18,47 @@
 2025-08-30 21:22:24,393 INFO: Camera server startup [in src/app.py:34]
 2025-08-30 22:52:35,752 INFO: Camera server startup [in src/app.py:34]
 2025-08-30 22:57:46,355 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:15:47,810 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:16:36,338 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:17:54,086 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:19:10,274 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:28:04,849 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:31:04,345 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:34:40,738 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:44:43,672 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:47:57,415 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:56:54,717 INFO: Camera server startup [in src/app.py:34]
+2025-08-30 23:57:01,106 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:228]
+2025-08-30 23:57:15,381 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-30 23:57:17,399 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-30 23:57:39,358 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.

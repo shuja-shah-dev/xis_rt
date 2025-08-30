@@ -61,12 +61,12 @@ class VideoInferenceService:
             "target_fps": config.get("target_fps", 30.0),
             "mqtt_topic": config.get("mqtt_topic", "detection/results"),
         }
-        
+
         # Just validate that the engine path exists, don't initialize CUDA here
         if not os.path.exists(self.config["engine_path"]):
             print(f"Engine path does not exist: {self.config['engine_path']}")
             return False
-            
+
         return True
 
     def _initialize_engine_in_thread(self):
@@ -98,20 +98,20 @@ class VideoInferenceService:
         self.is_running = True
         self.shutdown_event.clear()
         self.initialization_error = None
-        
+
         # Start processing thread - CUDA initialization will happen there
         self.processing_thread = threading.Thread(
             target=self._process_video, daemon=True
         )
         self.processing_thread.start()
-        
+
         # Give a moment for initialization and check if it succeeded
         time.sleep(0.1)
         if self.initialization_error:
             print(f"Initialization failed: {self.initialization_error}")
             self.stop_processing()
             return False
-            
+
         return True
 
     def stop_processing(self):
@@ -119,42 +119,32 @@ class VideoInferenceService:
         self.is_running = False
         self.shutdown_event.set()
         self.force_stop_event.set()
+        if self.socketio:
+            self.socketio.emit(
+                "status",
+                {"message": "Stream stopped", "streaming_active": False},
+                namespace="/ws",
+                to="stream",
+            )
 
         if self.processing_thread and self.processing_thread.is_alive():
             print("Waiting for processing thread to finish...")
             # Give it 3 seconds to stop gracefully
             self.processing_thread.join(timeout=3.0)
-            
+
             if self.processing_thread.is_alive():
-                print("WARNING: Processing thread did not terminate gracefully - forcing cleanup")
-                # Thread is still running, but we'll continue with cleanup anyway
-                # The thread cleanup will happen in its finally block
+                print("WARNING: Processing thread did not terminate gracefully")
 
-        # Force cleanup if needed
-        self.force_cleanup()
-        print("Video processing stopped")
+        # Reset to initial state instead of manual cleanup
+        self.reset_to_initial_state()
+        print("Video processing stopped and service reset")
         return True
 
-    def force_stop(self):
-        """Emergency stop function"""
-        print("EMERGENCY STOP: Force stopping video processing...")
-        self.is_running = False
-        self.shutdown_event.set()
-        self.force_stop_event.set()
-        
-        # Force cleanup immediately
-        self.force_cleanup()
-        
-        if self.socketio:
-            self.socketio.emit("video_status", {
-                "status": "force_stopped", 
-                "reason": "emergency_stop"
-            }, namespace="/ws")
-        
-        return True
+    def reset_to_initial_state(self):
+        """Reset the service back to initial state - avoids TensorRT cleanup issues"""
+        print("Resetting VideoInferenceService to initial state...")
 
-    def force_cleanup(self):
-        """Force cleanup of resources"""
+        # Release video capture safely
         try:
             if self.cap:
                 self.cap.release()
@@ -163,14 +153,60 @@ class VideoInferenceService:
         except Exception as e:
             print(f"Warning: Error releasing video capture: {e}")
 
-    def is_stuck(self):
-        """Check if processing appears to be stuck"""
-        return (time.time() - self.last_activity_time) > self.processing_timeout
+        # Reset all instance variables to initial state
+        self.is_running = False
+        self.processing_thread = None
+        self.current_fps = 0
+        self.last_websocket_frame_time = 0
+        self.tray_counter = 0
+        self.inference_active = False
+        self.initialization_error = None
+        self.last_activity_time = time.time()
+
+        # Clear events
+        self.shutdown_event.clear()
+        self.force_stop_event.clear()
+
+        # Clear frame queue
+        try:
+            while not self.frame_queue.empty():
+                self.frame_queue.get_nowait()
+        except:
+            pass
+
+        # Most importantly - set seg to None and let the thread handle cleanup naturally
+        # This avoids the problematic TensorRT destructor call
+        self.seg = None
+
+        print("Service reset to initial state completed")
+
+    def force_stop(self):
+        """Emergency stop function"""
+        print("EMERGENCY STOP: Force stopping video processing...")
+        self.is_running = False
+        self.shutdown_event.set()
+        self.force_stop_event.set()
+
+        # Just reset instead of manual cleanup
+        self.reset_to_initial_state()
+
+        if self.socketio:
+            self.socketio.emit(
+                "video_status",
+                {"status": "force_stopped", "reason": "emergency_stop"},
+                namespace="/ws",
+            )
+
+        return True
+
+    def force_cleanup(self):
+        """Force cleanup of resources - now just calls reset"""
+        self.reset_to_initial_state()
 
     def _process_video(self):
         """Main video processing loop - runs in separate thread"""
         print("Starting video processing thread...")
-        
+
         # Initialize CUDA/TensorRT in this thread
         if not self._initialize_engine_in_thread():
             print("Failed to initialize engine in processing thread")
@@ -199,25 +235,35 @@ class VideoInferenceService:
                 try:
                     # Update activity timestamp
                     self.last_activity_time = time.time()
-                    
+
                     ret, frame = self.cap.read()
                     if not ret:
                         print("End of video reached or failed to read frame")
                         # Emit video ended event to websocket
                         if self.socketio:
-                            self.socketio.emit("video_ended", {"reason": "end_of_video"}, namespace="/ws")
+                            self.socketio.emit(
+                                "video_ended",
+                                {"reason": "end_of_video"},
+                                namespace="/ws",
+                            )
                         break
 
                     current_timestamp = frame_idx / fps if fps > 0 else 0
-                    
+
                     # Use exact same logic as standalone file
                     shifted_timestamp = current_timestamp - 0.5
-                    inference_window_id = int(shifted_timestamp) if shifted_timestamp >= 0 else -1
-                    is_in_inference_window = (shifted_timestamp >= 0 and inference_window_id % 2 == 1)
-                    
-                    should_start_inference = (is_in_inference_window and 
-                                            inference_window_id != last_odd_timestamp and
-                                            not inference_active)
+                    inference_window_id = (
+                        int(shifted_timestamp) if shifted_timestamp >= 0 else -1
+                    )
+                    is_in_inference_window = (
+                        shifted_timestamp >= 0 and inference_window_id % 2 == 1
+                    )
+
+                    should_start_inference = (
+                        is_in_inference_window
+                        and inference_window_id != last_odd_timestamp
+                        and not inference_active
+                    )
 
                     if should_start_inference:
                         inference_active = True
@@ -228,8 +274,10 @@ class VideoInferenceService:
                     if inference_active:
                         inference_frame_count += 1
                         # Stop inference if we've completed minimum frames and moved out of inference window
-                        if (inference_frame_count >= self.config["min_inference_frames"] and 
-                            not is_in_inference_window):
+                        if (
+                            inference_frame_count >= self.config["min_inference_frames"]
+                            and not is_in_inference_window
+                        ):
                             inference_active = False
 
                     if inference_active:
@@ -239,17 +287,27 @@ class VideoInferenceService:
                     else:
                         vis = frame.copy()
                         detection_count = 0
-                        
+
                         # Show next inference time instead of "INFERENCE OFF"
                         if current_timestamp >= 0.5:
-                            current_window = int(shifted_timestamp) if shifted_timestamp >= 0 else -1
+                            current_window = (
+                                int(shifted_timestamp) if shifted_timestamp >= 0 else -1
+                            )
                             if current_window % 2 == 0:  # Not in inference window
                                 next_window = current_window + 1
                                 next_inference_time = next_window + 1.5
                             else:  # In inference window but not active
                                 next_inference_time = current_window + 1.5
-                            
-                            
+
+                            cv2.putText(
+                                vis,
+                                f"Next inference: {next_inference_time:.1f}s",
+                                (10, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6,
+                                (255, 255, 0),
+                                2,
+                            )
 
                     fps_counter.update()
                     self.current_fps = fps_counter.get_fps()
@@ -271,7 +329,7 @@ class VideoInferenceService:
                     if self.shutdown_event.is_set() or self.force_stop_event.is_set():
                         print("Shutdown event received")
                         break
-                        
+
                 except Exception as e:
                     print(f"Error processing frame {frame_idx}: {e}")
                     # Continue processing other frames even if one fails
@@ -281,29 +339,55 @@ class VideoInferenceService:
         except Exception as e:
             print(f"Critical error in video processing loop: {e}")
             import traceback
+
             traceback.print_exc()
-            
+
             # Emit error to websocket
             if self.socketio:
-                self.socketio.emit("video_ended", {
-                    "reason": "critical_error", 
-                    "error": str(e)
-                }, namespace="/ws")
-        
+                self.socketio.emit(
+                    "video_ended",
+                    {"reason": "critical_error", "error": str(e)},
+                    namespace="/ws",
+                )
+
         finally:
             print("Cleaning up video processing thread...")
-            # Clean up resources in the same thread where they were created
+            # Simple cleanup - just release video capture
             if self.cap:
                 self.cap.release()
                 self.cap = None
-            
-            if self.seg:
-                print("Cleaning up TensorRT segmentor...")
-                self.seg.cleanup()
-                self.seg = None
-                
+
+            # Completely empty the CUDA context stack
+            if self.seg and hasattr(self.seg, "ctx"):
+                try:
+                    print("Emptying CUDA context stack...")
+                    # Pop all contexts from the stack until it's empty
+                    context_count = 0
+                    while True:
+                        try:
+                            self.seg.ctx.pop()
+                            context_count += 1
+                            print(f"Popped context #{context_count}")
+                        except Exception as pop_error:
+                            print(
+                                f"No more contexts to pop (popped {context_count} total)"
+                            )
+                            break
+
+                    # Also try to detach the context
+                    try:
+                        self.seg.ctx.detach()
+                        print("CUDA context detached")
+                    except Exception as detach_error:
+                        print(f"Context detach not needed or failed: {detach_error}")
+
+                    print("CUDA context stack cleaned successfully")
+                except Exception as e:
+                    print(f"Warning: Error cleaning CUDA context stack: {e}")
+
+            # Don't call explicit cleanup - let TRTSegmentor go out of scope naturally
+            print("Processing thread ending naturally (context stack emptied)")
             self.is_running = False
-            print("Video processing thread cleanup complete")
 
     def _process_inference_frame(self, frame, inference_frame_count, current_timestamp):
         lb, scale, left, top = letterbox(
@@ -345,15 +429,17 @@ class VideoInferenceService:
         if len(boxes_nms) > 0:
             keep_idx = []
             original_indices = np.where(keep)[0]
-            
+
             for nms_box, nms_score, nms_label in zip(boxes_nms, scores_nms, labels_nms):
                 for j, orig_idx in enumerate(original_indices):
-                    if (np.allclose(boxes_filtered[j], nms_box, atol=1e-5) and 
-                        np.isclose(scores_filtered[j], nms_score, atol=1e-5) and
-                        labels_filtered[j] == nms_label):
+                    if (
+                        np.allclose(boxes_filtered[j], nms_box, atol=1e-5)
+                        and np.isclose(scores_filtered[j], nms_score, atol=1e-5)
+                        and labels_filtered[j] == nms_label
+                    ):
                         keep_idx.append(orig_idx)
                         break
-            
+
             keep_idx = np.array(keep_idx, dtype=np.int64)
         else:
             keep_idx = np.array([], dtype=np.int64)
@@ -392,10 +478,27 @@ class VideoInferenceService:
             self._publish_mqtt_data(measurement_data, current_timestamp)
 
         # Show detection count and frame info instead of "INFERENCE ON"
-        
-        
+        cv2.putText(
+            vis,
+            f"Detections: {detection_count} | Frame: {inference_frame_count}/{self.config['min_inference_frames']}",
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2,
+        )
+
         # Add timestamp info
-        
+        cv2.putText(
+            vis,
+            f"Time: {current_timestamp:.1f}s | Tray: {self.tray_counter}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
+
         return vis, detection_count
 
     def _filter_by_score(self, scores, labels):
@@ -485,6 +588,7 @@ class VideoInferenceService:
         class_1_count = sum(1 for obj in objects if int(obj["label"]) == 1)
         missing_count = 0
 
+        # Count missing baguettes based on gaps > 32px
         if len(objects) > 0:
             for i in range(len(objects) - 1):
                 obj1 = objects[i]
@@ -493,9 +597,76 @@ class VideoInferenceService:
                 if distance > 32.0:
                     missing_count += 1
 
+        # Calculate average y-coordinate for distance lines
+        avg_y = (
+            int(np.mean([obj["center_y"] for obj in objects]))
+            if objects
+            else H_img // 2
+        )
+
+        # Draw masks and measurement lines for each object
         for obj_num, obj in enumerate(objects, 1):
             self._draw_object_visualization(
                 vis, obj, masks_lb_u8, scale, left, top, W_img, H_img
+            )
+
+        # Draw distance measurement lines (white lines like standalone file)
+        if len(objects) > 0:
+            line_y = max(10, avg_y - 50)  # Draw line above the objects
+
+            # Distance from tray start to first object
+            first_obj = objects[0]
+            line_start_x = max(0, min(tray_start, W_img - 1))
+            line_end_x = max(0, min(int(first_obj["left_edge"]), W_img - 1))
+            cv2.line(
+                vis, (line_start_x, line_y), (line_end_x, line_y), (255, 255, 255), 1
+            )
+
+            # Distances between consecutive objects with missing detection
+            for i in range(len(objects) - 1):
+                obj1 = objects[i]
+                obj2 = objects[i + 1]
+
+                distance = obj2["left_edge"] - obj1["right_edge"]
+
+                # Draw white line between object edges
+                line_start_x = max(0, min(int(obj1["right_edge"]), W_img - 1))
+                line_end_x = max(0, min(int(obj2["left_edge"]), W_img - 1))
+                cv2.line(
+                    vis,
+                    (line_start_x, line_y),
+                    (line_end_x, line_y),
+                    (255, 255, 255),
+                    1,
+                )
+
+                # Draw red cross (X) for missing baguettes
+                if distance > 32.0:
+                    center_x = int((line_start_x + line_end_x) / 2)
+                    center_y = line_y
+
+                    # Draw bright red cross (X shape)
+                    cv2.line(
+                        vis,
+                        (center_x - 8, center_y - 8),
+                        (center_x + 8, center_y + 8),
+                        (0, 0, 255),
+                        3,
+                    )
+                    cv2.line(
+                        vis,
+                        (center_x + 8, center_y - 8),
+                        (center_x - 8, center_y + 8),
+                        (0, 0, 255),
+                        3,
+                    )
+
+            # Distance from last object to tray end
+            last_obj = objects[-1]
+            line_start_x = max(0, min(int(last_obj["right_edge"]), W_img - 1))
+            line_end_x = max(0, min(tray_end, W_img - 1))
+            cv2.line(
+                vis, (line_start_x, line_y), (line_end_x, line_y), (255, 255, 255), 1
             )
 
         measurement_data = {
@@ -519,7 +690,7 @@ class VideoInferenceService:
 
         if i >= len(masks_lb_u8):
             return  # Safety check
-            
+
         m = masks_lb_u8[i]
         x_lb, y_lb, w_lb, h_lb = cv2.boundingRect(m)
         if w_lb <= 0 or h_lb <= 0:
@@ -537,16 +708,16 @@ class VideoInferenceService:
 
         # Resize mask patch to match image coordinates
         patch = m[y_lb : y_lb + h_lb, x_lb : x_lb + w_lb]
-        
+
         # Ensure patch is not empty
         if patch.size == 0:
             return
-            
+
         mroi = cv2.resize(patch, (pw, ph), interpolation=cv2.INTER_NEAREST)
 
         # Get the region of interest from the visualization
         roi = vis[y1 : y1 + ph, x1 : x1 + pw]
-        
+
         # Ensure ROI dimensions match mask dimensions
         if roi.shape[:2] != mroi.shape:
             return
@@ -554,26 +725,27 @@ class VideoInferenceService:
         # Color based on class: 0=Green visual, 1=Red visual (same as standalone file)
         label_val = int(lab)
         if label_val == 0:
-            mask_color = (0, 0, 255)  # Green in BGR for defected (class 0)
+            mask_color = (0, 0, 255)
+            # Green in BGR for defected (class 0)
         else:
             mask_color = (0, 255, 0)  # Red in BGR for good (class 1)
 
         # Create colored overlay
         color_roi = np.full_like(roi, mask_color)
-        
+
         # Apply alpha blending where mask is non-zero
         mask_bool = mroi > 0
         if np.any(mask_bool):
             # Create 3-channel mask for blending
             mask_3ch = np.stack([mask_bool, mask_bool, mask_bool], axis=2)
-            
+
             # Blend only where mask is active
             blended = roi.copy()
             blended[mask_3ch] = (
-                roi[mask_3ch] * (1.0 - self.config["alpha"]) + 
-                color_roi[mask_3ch] * self.config["alpha"]
+                roi[mask_3ch] * (1.0 - self.config["alpha"])
+                + color_roi[mask_3ch] * self.config["alpha"]
             ).astype(np.uint8)
-            
+
             # Copy blended result back to vis
             roi[:] = blended
 
@@ -607,17 +779,18 @@ class VideoInferenceService:
         height, width = vis.shape[:2]
         fps_text = f"FPS: {self.current_fps:.1f}"
         text_size = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+        # Move FPS counter down a bit - changed from (10, text_size[1] + 25) to (40, text_size[1] + 55)
         cv2.rectangle(
             vis,
-            (width - text_size[0] - 20, 10),
-            (width - 5, text_size[1] + 25),
+            (width - text_size[0] - 20, 40),
+            (width - 5, text_size[1] + 55),
             (0, 0, 0),
             -1,
         )
         cv2.putText(
             vis,
             fps_text,
-            (width - text_size[0] - 15, text_size[1] + 20),
+            (width - text_size[0] - 15, text_size[1] + 50),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 255, 0),
@@ -733,7 +906,7 @@ def apply_nms(boxes, scores, labels, nms_threshold=0.5):
 class TRTSegmentor:
     def __init__(self, engine_path, verbose=False):
         print(f"Initializing TRTSegmentor with engine: {engine_path}")
-        
+
         # Initialize CUDA - this creates a primary context for the current thread
         cuda.init()
         self.device = cuda.Device(0)
@@ -754,10 +927,14 @@ class TRTSegmentor:
             self.model_load_s = t1 - t0
 
             names = (
-                [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
+                [
+                    self.engine.get_tensor_name(i)
+                    for i in range(self.engine.num_io_tensors)
+                ]
                 if self.trt10
                 else [
-                    self.engine.get_binding_name(i) for i in range(self.engine.num_bindings)
+                    self.engine.get_binding_name(i)
+                    for i in range(self.engine.num_bindings)
                 ]
             )
 
@@ -777,7 +954,12 @@ class TRTSegmentor:
 
             if any(
                 x is None
-                for x in [self.name_in, self.name_dets, self.name_labels, self.name_masks]
+                for x in [
+                    self.name_in,
+                    self.name_dets,
+                    self.name_labels,
+                    self.name_masks,
+                ]
             ):
                 raise RuntimeError(f"Could not find expected tensors. Found: {names}")
 
@@ -798,7 +980,9 @@ class TRTSegmentor:
                     tuple(self.engine.get_tensor_shape(name))
                     if self.trt10
                     else tuple(
-                        self.engine.get_binding_shape(self.engine.get_binding_index(name))
+                        self.engine.get_binding_shape(
+                            self.engine.get_binding_index(name)
+                        )
                     )
                 )
 
@@ -807,7 +991,9 @@ class TRTSegmentor:
                     tuple(self.context.get_tensor_shape(name))
                     if self.trt10
                     else tuple(
-                        self.context.get_binding_shape(self.engine.get_binding_index(name))
+                        self.context.get_binding_shape(
+                            self.engine.get_binding_index(name)
+                        )
                     )
                 )
 
@@ -877,14 +1063,18 @@ class TRTSegmentor:
                 if kind == "labels":
                     N = (
                         shp_dets_eng[1]
-                        if shp_dets_eng and len(shp_dets_eng) > 1 and shp_dets_eng[1] > 0
+                        if shp_dets_eng
+                        and len(shp_dets_eng) > 1
+                        and shp_dets_eng[1] > 0
                         else DEFAULT_TOPK
                     )
                     return (1, N)
                 if kind == "masks":
                     N = (
                         shp_dets_eng[1]
-                        if shp_dets_eng and len(shp_dets_eng) > 1 and shp_dets_eng[1] > 0
+                        if shp_dets_eng
+                        and len(shp_dets_eng) > 1
+                        and shp_dets_eng[1] > 0
                         else DEFAULT_TOPK
                     )
                     Hm = (
@@ -958,7 +1148,7 @@ class TRTSegmentor:
                     self.bindings_order[i] = int(self.dev_ptr[n])
 
             print("TRTSegmentor initialization complete")
-            
+
         finally:
             # Keep the context current for this thread - don't pop it here
             # The context will stay active for the lifetime of this object
@@ -972,9 +1162,7 @@ class TRTSegmentor:
                 self.dev_ptr[self.name_in], self.host_buf[self.name_in], self.stream
             )
         else:
-            cuda.memcpy_htod(
-                self.dev_ptr[self.name_in], self.host_buf[self.name_in]
-            )
+            cuda.memcpy_htod(self.dev_ptr[self.name_in], self.host_buf[self.name_in])
 
         if measure_gpu:
             self.stream.synchronize()
@@ -1012,12 +1200,8 @@ class TRTSegmentor:
                 self.host_buf[self.name_labels], self.dev_ptr[self.name_labels]
             )
 
-        dets_raw = (
-            self.host_buf[self.name_dets].view().reshape(1, self.max_det, 5)[0]
-        )
-        labels_raw = (
-            self.host_buf[self.name_labels].view().reshape(1, self.max_det)[0]
-        )
+        dets_raw = self.host_buf[self.name_dets].view().reshape(1, self.max_det, 5)[0]
+        labels_raw = self.host_buf[self.name_labels].view().reshape(1, self.max_det)[0]
         np.copyto(self.output_boxes, dets_raw[:, :4])
         np.copyto(self.output_scores, dets_raw[:, 4])
         np.copyto(self.output_labels, labels_raw.astype(np.int32))
@@ -1061,11 +1245,11 @@ class TRTSegmentor:
         Clean up all CUDA resources with timeout protection
         """
         print("Cleaning up TRTSegmentor CUDA resources...")
-        
+
         # Set a timeout for the entire cleanup process
         cleanup_start_time = time.time()
         cleanup_timeout = 5.0  # 5 second timeout for cleanup
-        
+
         try:
             # First, try to synchronize any pending operations with timeout
             try:
@@ -1076,7 +1260,7 @@ class TRTSegmentor:
                     print("CUDA stream synchronized")
             except Exception as e:
                 print(f"Warning: Could not synchronize CUDA stream: {e}")
-                
+
             # Check timeout
             if time.time() - cleanup_start_time > cleanup_timeout:
                 print("Cleanup timeout reached during stream sync - aborting")
@@ -1092,10 +1276,12 @@ class TRTSegmentor:
                         freed_count += 1
                 except Exception as e:
                     print(f"Warning: Error freeing device memory for {name}: {e}")
-                    
+
                 # Check timeout during cleanup
                 if time.time() - cleanup_start_time > cleanup_timeout:
-                    print(f"Cleanup timeout reached - freed {freed_count}/{len(self.dev_ptr)} buffers")
+                    print(
+                        f"Cleanup timeout reached - freed {freed_count}/{len(self.dev_ptr)} buffers"
+                    )
                     break
 
             print(f"Freed {freed_count} device memory buffers")
@@ -1110,10 +1296,10 @@ class TRTSegmentor:
             self.mask_host_capacity = 0
 
             print("CUDA resources cleanup attempted")
-            
+
         except Exception as e:
             print(f"Warning: Error during CUDA resource cleanup: {e}")
-        
+
         finally:
             # Always try to detach context, even if other cleanup failed
             print("Detaching CUDA context...")
@@ -1127,11 +1313,11 @@ class TRTSegmentor:
                 # This is the problematic TensorRT error - don't let it crash the app
                 print(f"Warning: TensorRT context cleanup error (IGNORED): {e}")
                 print("This TensorRT cleanup warning can be safely ignored")
-                
+
             # Small delay to let any background operations complete
             try:
                 time.sleep(0.1)
             except:
                 pass
-                
+
             print("TensorRT cleanup completed (with warnings ignored)")

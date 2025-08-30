@@ -21,8 +21,10 @@ def get_genicam_service():
 
 def get_video_service_rd():
     from app import video_service
+
     # init_video_service_rd()
     return video_service
+
 
 @inference_bp.route("/stream/normal", methods=["POST"])
 def start_normal_stream():
@@ -44,7 +46,7 @@ def start_normal_stream():
                 "video_path": config.get("VIDEO_INPUT_PATH"),
                 "score_threshold": 0.4,
                 "score_class0": 0.6,
-                "score_class1":0.3 ,
+                "score_class1": 0.3,
                 "nms_threshold": 0.2,
                 "mask_threshold": 0.4,
                 "canvas_size": 640,
@@ -154,47 +156,68 @@ def start_normal_stream():
 @inference_bp.route("/stream/stop", methods=["POST"])
 def stop_stream():
     """Stop camera streaming"""
+    config = app_config.get_config()
+    success = False
     try:
-        print("Stopping stream request...")
-
-        genicam_service = get_genicam_service()
-        success = False
-        try:
-
-            def stop_async():
-                try:
-                    stop_genicam_service()
-                except Exception as e:
-                    print(f"Background stop error: {e}")
-
-            stop_thread = threading.Thread(target=stop_async, daemon=True)
-            stop_thread.start()
-            success = True
-
-        except Exception as e:
-            error_msg = f"Failed to stop GenICam service: {str(e)}"
-            print(error_msg)
-            traceback.print_exc()
-            return jsonify({"status": "error", "message": error_msg}), 500
-
-        if success:
-            result = "Stream stopped successfully"
-            status_code = 200
-
+        if config["input_type"] == "video":
+            if config.get("video_mode") == "raw_dough":
+                video_service = get_video_service_rd()
+                video_service.stop_processing()
+                success = True
+                if success:
+                    result = "Stream stopped successfully"
+                    status_code = 200
+                return (
+                    jsonify(
+                        {
+                            "status": "success" if success else "error",
+                            "message": result,
+                            "service_status": genicam_service.get_status(),
+                        }
+                    ),
+                    status_code,
+                )
         else:
-            result = "Failed to stop stream"
-            status_code = 500
+            print("Stopping stream request...")
 
-        return (
-            jsonify(
-                {
-                    "status": "success" if success else "error",
-                    "message": result,
-                    "service_status": genicam_service.get_status(),
-                }
-            ),
-            status_code,
-        )
+            genicam_service = get_genicam_service()
+
+            try:
+
+                def stop_async():
+                    try:
+                        stop_genicam_service()
+                    except Exception as e:
+                        print(f"Background stop error: {e}")
+
+                stop_thread = threading.Thread(target=stop_async, daemon=True)
+                stop_thread.start()
+                success = True
+
+            except Exception as e:
+                error_msg = f"Failed to stop GenICam service: {str(e)}"
+                print(error_msg)
+                traceback.print_exc()
+                return jsonify({"status": "error", "message": error_msg}), 500
+
+            if success:
+                result = "Stream stopped successfully"
+                status_code = 200
+
+            else:
+                result = "Failed to stop stream"
+                status_code = 500
+
+            return (
+                jsonify(
+                    {
+                        "status": "success" if success else "error",
+                        "message": result,
+                        "service_status": genicam_service.get_status(),
+                    }
+                ),
+                status_code,
+            )
 
     except Exception as e:
         error_msg = f"Error stopping stream: {str(e)}"
