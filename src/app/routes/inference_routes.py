@@ -65,7 +65,7 @@ def start_normal_stream():
             if success:
                 result = "Normal camera stream started successfully"
                 status_code = 200
-                print(result)
+        
             else:
                 result = "Failed to start normal camera stream"
                 status_code = 500

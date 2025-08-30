@@ -104,7 +104,6 @@ def create_app():
     # ============ SOCKETIO EVENT HANDLERS MUST BE DEFINED AFTER INIT ============
     @socketio.on("connect", namespace="/ws")
     def handle_connect():
-        print("✅ Client connected to /ws namespace")
         emit("status", {"message": "Connected to WebSocket", "connected": True})
 
     @socketio.on("disconnect", namespace="/ws")

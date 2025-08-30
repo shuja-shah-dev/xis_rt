@@ -887,7 +887,8 @@ class TensorRTGenICamDetector:
 
     def emit_websocket_frame(self, frame_with_detections, metadata=None):
         """Emit frame through WebSocket - thread-safe version"""
-        if not self.socketio or not self.websocket_mode:
+        
+        if not self.socketio or not self.websocket_mode or not self.streaming_active:
             return
 
         try:
@@ -1592,12 +1593,13 @@ class TensorRTGenICamDetector:
             self._reset_streaming_state()
 
             # Update harvester device list
+            # Update harvester device list
             if self.h:
                 try:
                     self.h.update()
                     print(f"Device list updated. Found {len(self.h.device_info_list)} cameras")
                 except Exception as e:
-                    print(f"Error updating device list: {e}")
+                    pass  # Ignore update errors during cleanup
 
             gc.collect()
             print("Reset to initial state complete")
@@ -1753,8 +1755,10 @@ class TensorRTGenICamDetector:
 
             # Initialize Harvester if needed or if CTI path changed
             if self.h is None or self.cti_file_path != cti_file_path:
+                if self.h:  # Reset harvester if CTI changed
+                    self.h.reset()
+                    self.h = None
                 self.initialize_camera(cti_file_path)
-
             # Initialize TensorRT if needed
             if self.detector is None:
                 self.initialize_tensorrt_with_path(model_path)
