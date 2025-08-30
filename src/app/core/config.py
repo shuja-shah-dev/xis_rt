@@ -47,7 +47,7 @@ class AppConfig:
 
     def get_config(self):
         if self.model_selection:
-            engine = self.get_modlel_path(self.model_selection)
+            engine = self.get_modlel_path()
         return {
             "input_type": self.input_type,
             "model_selection": self.model_selection,

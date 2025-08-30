@@ -34,6 +34,12 @@ const Inference = ({ setActiveScreen, disconnectStream, socketRef }) => {
         console.log("Status update:", data);
       });
 
+      newSocket.on('video_ended',(data) => {
+        console.log('succesffully reached video_ended event')
+        console.log(data);
+        
+      });
+
       newSocket.on("stream_frame", (data) => {
         console.log("=== STREAM FRAME RECEIVED ===");
         console.log("Frame data:", data.frame ? `Base64 string length: ${data.frame.length}` : "NO FRAME DATA");

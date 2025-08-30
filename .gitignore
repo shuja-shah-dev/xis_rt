@@ -6,3 +6,4 @@ __pycache__
 pycache
 models/
 src/app/core/runtime_models/
+src/app/core/runtime_videos/

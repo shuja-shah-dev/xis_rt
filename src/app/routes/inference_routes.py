@@ -21,14 +21,8 @@ def get_genicam_service():
 
 def get_video_service_rd():
     from app import video_service
-
-    return video_service()
-
-
-def run_video_inference(config):
-    """Run video inference - placeholder for video processing"""
-    return f"Running video inference with model {config['model_selection']} on video {config['video_path']}"
-
+    # init_video_service_rd()
+    return video_service
 
 @inference_bp.route("/stream/normal", methods=["POST"])
 def start_normal_stream():
@@ -49,9 +43,9 @@ def start_normal_stream():
                 "engine_path": config.get("VIDEO_ENGINE_PATH"),
                 "video_path": config.get("VIDEO_INPUT_PATH"),
                 "score_threshold": 0.4,
-                "score_class0": None,
-                "score_class1": None,
-                "nms_threshold": 0.5,
+                "score_class0": 0.6,
+                "score_class1":0.3 ,
+                "nms_threshold": 0.2,
                 "mask_threshold": 0.4,
                 "canvas_size": 640,
                 "alpha": 0.3,

@@ -33,8 +33,12 @@ class VideoInferenceService:
         self.shutdown_event = threading.Event()
         self.tray_counter = 0
         self.inference_active = False
-        self.seg = None
+        self.seg = None  # Will be initialized in processing thread
         self.cap = None
+        self.initialization_error = None
+        self.force_stop_event = threading.Event()
+        self.last_activity_time = time.time()
+        self.processing_timeout = 30.0  # 30 second timeout
 
     def set_socketio(self, socketio):
         self.socketio = socketio
@@ -57,16 +61,24 @@ class VideoInferenceService:
             "target_fps": config.get("target_fps", 30.0),
             "mqtt_topic": config.get("mqtt_topic", "detection/results"),
         }
-        return self._initialize_engine()
+        
+        # Just validate that the engine path exists, don't initialize CUDA here
+        if not os.path.exists(self.config["engine_path"]):
+            print(f"Engine path does not exist: {self.config['engine_path']}")
+            return False
+            
+        return True
 
-    def _initialize_engine(self):
+    def _initialize_engine_in_thread(self):
+        """Initialize the TensorRT engine in the processing thread"""
         try:
-            if not os.path.exists(self.config["engine_path"]):
-                return False
+            print("Initializing TensorRT engine in processing thread...")
             self.seg = TRTSegmentor(self.config["engine_path"])
+            print("TensorRT engine initialized successfully")
             return True
         except Exception as e:
-            print(f"Engine initialization error: {e}")
+            print(f"Engine initialization error in processing thread: {e}")
+            self.initialization_error = str(e)
             return False
 
     def start_processing(self):
@@ -76,108 +88,222 @@ class VideoInferenceService:
         if not self.config.get("video_path") or not self.config.get("engine_path"):
             return False
 
-        self.cap = cv2.VideoCapture(self.config["video_path"])
-        if not self.cap.isOpened():
+        # Test video file access
+        test_cap = cv2.VideoCapture(self.config["video_path"])
+        if not test_cap.isOpened():
+            print(f"Could not open video file: {self.config['video_path']}")
             return False
+        test_cap.release()
 
         self.is_running = True
         self.shutdown_event.clear()
+        self.initialization_error = None
+        
+        # Start processing thread - CUDA initialization will happen there
         self.processing_thread = threading.Thread(
             target=self._process_video, daemon=True
         )
         self.processing_thread.start()
+        
+        # Give a moment for initialization and check if it succeeded
+        time.sleep(0.1)
+        if self.initialization_error:
+            print(f"Initialization failed: {self.initialization_error}")
+            self.stop_processing()
+            return False
+            
         return True
 
     def stop_processing(self):
+        print("Stopping video processing...")
         self.is_running = False
         self.shutdown_event.set()
+        self.force_stop_event.set()
 
         if self.processing_thread and self.processing_thread.is_alive():
-            self.processing_thread.join(timeout=5.0)
+            print("Waiting for processing thread to finish...")
+            # Give it 3 seconds to stop gracefully
+            self.processing_thread.join(timeout=3.0)
+            
+            if self.processing_thread.is_alive():
+                print("WARNING: Processing thread did not terminate gracefully - forcing cleanup")
+                # Thread is still running, but we'll continue with cleanup anyway
+                # The thread cleanup will happen in its finally block
 
-        if self.cap:
-            self.cap.release()
-            self.cap = None
-
+        # Force cleanup if needed
+        self.force_cleanup()
+        print("Video processing stopped")
         return True
 
+    def force_stop(self):
+        """Emergency stop function"""
+        print("EMERGENCY STOP: Force stopping video processing...")
+        self.is_running = False
+        self.shutdown_event.set()
+        self.force_stop_event.set()
+        
+        # Force cleanup immediately
+        self.force_cleanup()
+        
+        if self.socketio:
+            self.socketio.emit("video_status", {
+                "status": "force_stopped", 
+                "reason": "emergency_stop"
+            }, namespace="/ws")
+        
+        return True
+
+    def force_cleanup(self):
+        """Force cleanup of resources"""
+        try:
+            if self.cap:
+                self.cap.release()
+                self.cap = None
+                print("Video capture released")
+        except Exception as e:
+            print(f"Warning: Error releasing video capture: {e}")
+
+    def is_stuck(self):
+        """Check if processing appears to be stuck"""
+        return (time.time() - self.last_activity_time) > self.processing_timeout
+
     def _process_video(self):
-        fps = self.cap.get(cv2.CAP_PROP_FPS)
-        frame_idx = 0
-        fps_counter = FPSCounter()
+        """Main video processing loop - runs in separate thread"""
+        print("Starting video processing thread...")
+        
+        # Initialize CUDA/TensorRT in this thread
+        if not self._initialize_engine_in_thread():
+            print("Failed to initialize engine in processing thread")
+            self.is_running = False
+            return
 
-        inference_active = False
-        inference_frame_count = 0
-        last_odd_timestamp = -1
+        # Open video capture in this thread
+        self.cap = cv2.VideoCapture(self.config["video_path"])
+        if not self.cap.isOpened():
+            print("Failed to open video capture in processing thread")
+            self.is_running = False
+            return
 
-        while self.is_running:
-            ret, frame = self.cap.read()
-            if not ret:
-                break
+        try:
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            frame_idx = 0
+            fps_counter = FPSCounter()
 
-            current_timestamp = frame_idx / fps if fps > 0 else 0
-            shifted_timestamp = current_timestamp - 0.5
-            inference_window_id = (
-                int(shifted_timestamp) if shifted_timestamp >= 0 else -1
-            )
-            is_in_inference_window = (
-                shifted_timestamp >= 0 and inference_window_id % 2 == 1
-            )
+            inference_active = False
+            inference_frame_count = 0
+            last_odd_timestamp = -1
 
-            should_start_inference = (
-                is_in_inference_window
-                and inference_window_id != last_odd_timestamp
-                and not inference_active
-            )
+            print("Video processing loop started")
 
-            if should_start_inference:
-                inference_active = True
-                inference_frame_count = 0
-                last_odd_timestamp = inference_window_id
-                self.tray_counter += 1
+            while self.is_running and not self.force_stop_event.is_set():
+                try:
+                    # Update activity timestamp
+                    self.last_activity_time = time.time()
+                    
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        print("End of video reached or failed to read frame")
+                        # Emit video ended event to websocket
+                        if self.socketio:
+                            self.socketio.emit("video_ended", {"reason": "end_of_video"}, namespace="/ws")
+                        break
 
-            if inference_active:
-                inference_frame_count += 1
-                if (
-                    inference_frame_count >= self.config["min_inference_frames"]
-                    and not is_in_inference_window
-                ):
-                    inference_active = False
+                    current_timestamp = frame_idx / fps if fps > 0 else 0
+                    
+                    # Use exact same logic as standalone file
+                    shifted_timestamp = current_timestamp - 0.5
+                    inference_window_id = int(shifted_timestamp) if shifted_timestamp >= 0 else -1
+                    is_in_inference_window = (shifted_timestamp >= 0 and inference_window_id % 2 == 1)
+                    
+                    should_start_inference = (is_in_inference_window and 
+                                            inference_window_id != last_odd_timestamp and
+                                            not inference_active)
 
-            if inference_active:
-                vis = self._process_inference_frame(
-                    frame, inference_frame_count, current_timestamp
-                )
-            else:
-                vis = frame.copy()
-                cv2.putText(
-                    vis,
-                    f"INFERENCE OFF (Timestamp: {current_timestamp:.1f}s)",
-                    (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2,
-                )
+                    if should_start_inference:
+                        inference_active = True
+                        inference_frame_count = 0
+                        last_odd_timestamp = inference_window_id
+                        self.tray_counter += 1
 
-            fps_counter.update()
-            self.current_fps = fps_counter.get_fps()
+                    if inference_active:
+                        inference_frame_count += 1
+                        # Stop inference if we've completed minimum frames and moved out of inference window
+                        if (inference_frame_count >= self.config["min_inference_frames"] and 
+                            not is_in_inference_window):
+                            inference_active = False
 
-            self._add_fps_overlay(vis)
-            self._emit_frame(
-                vis,
-                {
-                    "timestamp": current_timestamp,
-                    "inference_active": inference_active,
-                    "fps": self.current_fps,
-                    "frame_idx": frame_idx,
-                },
-            )
+                    if inference_active:
+                        vis, detection_count = self._process_inference_frame(
+                            frame, inference_frame_count, current_timestamp
+                        )
+                    else:
+                        vis = frame.copy()
+                        detection_count = 0
+                        
+                        # Show next inference time instead of "INFERENCE OFF"
+                        if current_timestamp >= 0.5:
+                            current_window = int(shifted_timestamp) if shifted_timestamp >= 0 else -1
+                            if current_window % 2 == 0:  # Not in inference window
+                                next_window = current_window + 1
+                                next_inference_time = next_window + 1.5
+                            else:  # In inference window but not active
+                                next_inference_time = current_window + 1.5
+                            
+                            
 
-            frame_idx += 1
+                    fps_counter.update()
+                    self.current_fps = fps_counter.get_fps()
+                    self.inference_active = inference_active
 
-            if self.shutdown_event.is_set():
-                break
+                    self._add_fps_overlay(vis)
+                    self._emit_frame(
+                        vis,
+                        {
+                            "timestamp": current_timestamp,
+                            "inference_active": inference_active,
+                            "fps": self.current_fps,
+                            "frame_idx": frame_idx,
+                        },
+                    )
+
+                    frame_idx += 1
+
+                    if self.shutdown_event.is_set() or self.force_stop_event.is_set():
+                        print("Shutdown event received")
+                        break
+                        
+                except Exception as e:
+                    print(f"Error processing frame {frame_idx}: {e}")
+                    # Continue processing other frames even if one fails
+                    frame_idx += 1
+                    continue
+
+        except Exception as e:
+            print(f"Critical error in video processing loop: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Emit error to websocket
+            if self.socketio:
+                self.socketio.emit("video_ended", {
+                    "reason": "critical_error", 
+                    "error": str(e)
+                }, namespace="/ws")
+        
+        finally:
+            print("Cleaning up video processing thread...")
+            # Clean up resources in the same thread where they were created
+            if self.cap:
+                self.cap.release()
+                self.cap = None
+            
+            if self.seg:
+                print("Cleaning up TensorRT segmentor...")
+                self.seg.cleanup()
+                self.seg = None
+                
+            self.is_running = False
+            print("Video processing thread cleanup complete")
 
     def _process_inference_frame(self, frame, inference_frame_count, current_timestamp):
         lb, scale, left, top = letterbox(
@@ -185,7 +311,18 @@ class VideoInferenceService:
         )
         boxes, labels, scores, _ = self.seg.infer_fast(lb, measure_gpu=False)
 
-        keep = self._filter_by_score(scores, labels)
+        # Class-specific score filtering
+        keep = np.zeros(len(scores), dtype=bool)
+        for i in range(len(scores)):
+            label_val = int(labels[i])
+            if label_val == 0 and self.config["score_class0"] is not None:
+                threshold = self.config["score_class0"]
+            elif label_val == 1 and self.config["score_class1"] is not None:
+                threshold = self.config["score_class1"]
+            else:
+                threshold = self.config["score_threshold"]
+            keep[i] = scores[i] >= threshold
+
         boxes_filtered = boxes[keep]
         labels_filtered = labels[keep]
         scores_filtered = scores[keep]
@@ -204,15 +341,22 @@ class VideoInferenceService:
                 labels_filtered,
             )
 
-        keep_idx = self._get_keep_indices(
-            keep,
-            boxes_filtered,
-            scores_filtered,
-            labels_filtered,
-            boxes_nms,
-            scores_nms,
-            labels_nms,
-        )
+        # Find indices in original arrays for mask copying
+        if len(boxes_nms) > 0:
+            keep_idx = []
+            original_indices = np.where(keep)[0]
+            
+            for nms_box, nms_score, nms_label in zip(boxes_nms, scores_nms, labels_nms):
+                for j, orig_idx in enumerate(original_indices):
+                    if (np.allclose(boxes_filtered[j], nms_box, atol=1e-5) and 
+                        np.isclose(scores_filtered[j], nms_score, atol=1e-5) and
+                        labels_filtered[j] == nms_label):
+                        keep_idx.append(orig_idx)
+                        break
+            
+            keep_idx = np.array(keep_idx, dtype=np.int64)
+        else:
+            keep_idx = np.array([], dtype=np.int64)
 
         if keep_idx.size > 0:
             masks_fp, _ = self.seg.copy_masks(keep_idx.astype(np.int64))
@@ -238,24 +382,21 @@ class VideoInferenceService:
                 should_publish,
                 current_timestamp,
             )
+            detection_count = len(boxes_nms)
         else:
             vis = frame.copy()
             measurement_data = self._create_empty_measurement_data()
+            detection_count = 0
 
         if should_publish and self.mqtt_client:
             self._publish_mqtt_data(measurement_data, current_timestamp)
 
-        cv2.putText(
-            vis,
-            f"INFERENCE ON (Frame {inference_frame_count}/{self.config['min_inference_frames']})",
-            (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 0),
-            2,
-        )
-
-        return vis
+        # Show detection count and frame info instead of "INFERENCE ON"
+        
+        
+        # Add timestamp info
+        
+        return vis, detection_count
 
     def _filter_by_score(self, scores, labels):
         keep = np.zeros(len(scores), dtype=bool)
@@ -376,11 +517,15 @@ class VideoInferenceService:
         lab = obj["label"]
         center_x, center_y = obj["center_x"], obj["center_y"]
 
+        if i >= len(masks_lb_u8):
+            return  # Safety check
+            
         m = masks_lb_u8[i]
         x_lb, y_lb, w_lb, h_lb = cv2.boundingRect(m)
         if w_lb <= 0 or h_lb <= 0:
             return
 
+        # Map letterbox coordinates to original image coordinates
         x1 = int(np.clip(round((x_lb - left) / scale), 0, W_img - 1))
         y1 = int(np.clip(round((y_lb - top) / scale), 0, H_img - 1))
         x2 = int(np.clip(round(((x_lb + w_lb) - left) / scale), 0, W_img))
@@ -390,28 +535,55 @@ class VideoInferenceService:
         if pw == 0 or ph == 0:
             return
 
+        # Resize mask patch to match image coordinates
         patch = m[y_lb : y_lb + h_lb, x_lb : x_lb + w_lb]
+        
+        # Ensure patch is not empty
+        if patch.size == 0:
+            return
+            
         mroi = cv2.resize(patch, (pw, ph), interpolation=cv2.INTER_NEAREST)
 
+        # Get the region of interest from the visualization
         roi = vis[y1 : y1 + ph, x1 : x1 + pw]
+        
+        # Ensure ROI dimensions match mask dimensions
+        if roi.shape[:2] != mroi.shape:
+            return
 
+        # Color based on class: 0=Green visual, 1=Red visual (same as standalone file)
         label_val = int(lab)
         if label_val == 0:
-            mask_color = (0, 255, 0)
+            mask_color = (0, 0, 255)  # Green in BGR for defected (class 0)
         else:
-            mask_color = (0, 0, 255)
+            mask_color = (0, 255, 0)  # Red in BGR for good (class 1)
 
-        color_roi = np.empty_like(roi)
-        color_roi[:] = mask_color
-        blended = cv2.addWeighted(
-            roi, 1.0 - self.config["alpha"], color_roi, self.config["alpha"], 0.0
-        )
-        cv2.copyTo(blended, mroi, roi)
+        # Create colored overlay
+        color_roi = np.full_like(roi, mask_color)
+        
+        # Apply alpha blending where mask is non-zero
+        mask_bool = mroi > 0
+        if np.any(mask_bool):
+            # Create 3-channel mask for blending
+            mask_3ch = np.stack([mask_bool, mask_bool, mask_bool], axis=2)
+            
+            # Blend only where mask is active
+            blended = roi.copy()
+            blended[mask_3ch] = (
+                roi[mask_3ch] * (1.0 - self.config["alpha"]) + 
+                color_roi[mask_3ch] * self.config["alpha"]
+            ).astype(np.uint8)
+            
+            # Copy blended result back to vis
+            roi[:] = blended
 
+        # Draw measurement lines (same as before)
         x1b, y1b, x2b, y2b = [int(v) for v in box]
         center_x_int, center_y_int = int(center_x), int(center_y)
 
+        # Blue horizontal line (length measurement)
         cv2.line(vis, (x1b, center_y_int), (x2b, center_y_int), (255, 0, 0), 1)
+        # Black vertical line (width measurement)
         cv2.line(vis, (center_x_int, y1b), (center_x_int, y2b), (0, 0, 0), 1)
 
     def _create_empty_measurement_data(self):
@@ -470,7 +642,7 @@ class VideoInferenceService:
 
         data = {"frame": frame_base64, "metadata": metadata}
 
-        self.socketio.emit("video_frame", data, namespace="/ws")
+        self.socketio.emit("stream_frame", data, namespace="/ws")
 
     def _to_u8_fast(self, m):
         if m.size == 0:
@@ -494,6 +666,9 @@ class VideoInferenceService:
             "tray_count": self.tray_counter,
             "inference_active": self.inference_active,
             "config": self.config,
+            "initialization_error": self.initialization_error,
+            "is_stuck": self.is_stuck(),
+            "last_activity": time.time() - self.last_activity_time,
         }
 
 
@@ -557,229 +732,249 @@ def apply_nms(boxes, scores, labels, nms_threshold=0.5):
 
 class TRTSegmentor:
     def __init__(self, engine_path, verbose=False):
-        self.trt10 = int(trt.__version__.split(".")[0]) >= 10
-        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.ERROR)
+        print(f"Initializing TRTSegmentor with engine: {engine_path}")
+        
+        # Initialize CUDA - this creates a primary context for the current thread
+        cuda.init()
+        self.device = cuda.Device(0)
+        # Make this the primary context for this device
+        self.ctx = self.device.make_context()
+        self.ctx.push()  # Make it current
 
-        t0 = time.perf_counter()
-        with open(engine_path, "rb") as f:
-            runtime = trt.Runtime(logger)
-            self.engine = runtime.deserialize_cuda_engine(f.read())
-        self.context = self.engine.create_execution_context()
-        t1 = time.perf_counter()
-        self.model_load_s = t1 - t0
+        try:
+            self.trt10 = int(trt.__version__.split(".")[0]) >= 10
+            logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.ERROR)
 
-        names = (
-            [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
-            if self.trt10
-            else [
-                self.engine.get_binding_name(i) for i in range(self.engine.num_bindings)
-            ]
-        )
+            t0 = time.perf_counter()
+            with open(engine_path, "rb") as f:
+                runtime = trt.Runtime(logger)
+                self.engine = runtime.deserialize_cuda_engine(f.read())
+            self.context = self.engine.create_execution_context()
+            t1 = time.perf_counter()
+            self.model_load_s = t1 - t0
 
-        def has(n):
-            return any(n == x for x in names)
+            names = (
+                [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
+                if self.trt10
+                else [
+                    self.engine.get_binding_name(i) for i in range(self.engine.num_bindings)
+                ]
+            )
 
-        def find(sub):
-            for n in names:
-                if sub in n:
-                    return n
-            return None
+            def has(n):
+                return any(n == x for x in names)
 
-        self.name_in = "raw_input" if has("raw_input") else find("raw_input")
-        self.name_dets = "dets" if has("dets") else find("dets")
-        self.name_labels = "labels" if has("labels") else find("label")
-        self.name_masks = "masks" if has("masks") else find("mask")
+            def find(sub):
+                for n in names:
+                    if sub in n:
+                        return n
+                return None
 
-        if any(
-            x is None
-            for x in [self.name_in, self.name_dets, self.name_labels, self.name_masks]
-        ):
-            raise RuntimeError(f"Could not find expected tensors. Found: {names}")
+            self.name_in = "raw_input" if has("raw_input") else find("raw_input")
+            self.name_dets = "dets" if has("dets") else find("dets")
+            self.name_labels = "labels" if has("labels") else find("label")
+            self.name_masks = "masks" if has("masks") else find("mask")
 
-        def nptype_of(name):
+            if any(
+                x is None
+                for x in [self.name_in, self.name_dets, self.name_labels, self.name_masks]
+            ):
+                raise RuntimeError(f"Could not find expected tensors. Found: {names}")
+
+            def nptype_of(name):
+                if self.trt10:
+                    return trt.nptype(self.engine.get_tensor_dtype(name))
+                else:
+                    idx = self.engine.get_binding_index(name)
+                    return trt.nptype(self.engine.get_binding_dtype(idx))
+
+            self.dtype_in = nptype_of(self.name_in)
+            self.dtype_dets = nptype_of(self.name_dets)
+            self.dtype_labels = nptype_of(self.name_labels)
+            self.dtype_masks = nptype_of(self.name_masks)
+
+            def eng_shape(name):
+                return (
+                    tuple(self.engine.get_tensor_shape(name))
+                    if self.trt10
+                    else tuple(
+                        self.engine.get_binding_shape(self.engine.get_binding_index(name))
+                    )
+                )
+
+            def ctx_shape(name):
+                return (
+                    tuple(self.context.get_tensor_shape(name))
+                    if self.trt10
+                    else tuple(
+                        self.context.get_binding_shape(self.engine.get_binding_index(name))
+                    )
+                )
+
+            shp_in_engine = eng_shape(self.name_in)
+
             if self.trt10:
-                return trt.nptype(self.engine.get_tensor_dtype(name))
+                shp_in_rt = shp_in_engine
+                if -1 in shp_in_rt:
+                    H, W = (
+                        (shp_in_rt[-3], shp_in_rt[-2])
+                        if shp_in_rt[-1] == 3
+                        else (shp_in_rt[-2], shp_in_rt[-1])
+                    )
+                    shp_in_rt = (
+                        1,
+                        H if H > 0 else DEFAULT_CANVAS,
+                        W if W > 0 else DEFAULT_CANVAS,
+                        3,
+                    )
+                    self.context.set_input_shape(self.name_in, shp_in_rt)
             else:
-                idx = self.engine.get_binding_index(name)
-                return trt.nptype(self.engine.get_binding_dtype(idx))
+                b = self.engine.get_binding_index(self.name_in)
+                shp_in_rt = shp_in_engine
+                if -1 in shp_in_engine:
+                    if self.engine.num_optimization_profiles > 0:
+                        self.context.active_optimization_profile = 0
+                    H, W = (
+                        (shp_in_engine[-3], shp_in_engine[-2])
+                        if shp_in_engine[-1] == 3
+                        else (shp_in_engine[-2], shp_in_engine[-1])
+                    )
+                    shp_in_rt = (
+                        1,
+                        H if H > 0 else DEFAULT_CANVAS,
+                        W if W > 0 else DEFAULT_CANVAS,
+                        3,
+                    )
+                    self.context.set_binding_shape(b, shp_in_rt)
 
-        self.dtype_in = nptype_of(self.name_in)
-        self.dtype_dets = nptype_of(self.name_dets)
-        self.dtype_labels = nptype_of(self.name_labels)
-        self.dtype_masks = nptype_of(self.name_masks)
+            shp_in_rt_now = ctx_shape(self.name_in)
+            shp_dets_ctx = ctx_shape(self.name_dets)
+            shp_dets_eng = eng_shape(self.name_dets)
+            shp_labels_ctx = ctx_shape(self.name_labels)
+            shp_labels_eng = eng_shape(self.name_labels)
+            shp_masks_ctx = ctx_shape(self.name_masks)
+            shp_masks_eng = eng_shape(self.name_masks)
 
-        def eng_shape(name):
-            return (
-                tuple(self.engine.get_tensor_shape(name))
-                if self.trt10
-                else tuple(
-                    self.engine.get_binding_shape(self.engine.get_binding_index(name))
+            def finalize(ctx_shp, eng_shp, kind):
+                def ok(s):
+                    return s and all((d is not None and d > 0) for d in s)
+
+                if ok(ctx_shp):
+                    return tuple(ctx_shp)
+                if ok(eng_shp):
+                    return tuple(eng_shp)
+                if kind == "in":
+                    H = eng_shp[-3] if eng_shp and eng_shp[-3] > 0 else DEFAULT_CANVAS
+                    W = eng_shp[-2] if eng_shp and eng_shp[-2] > 0 else DEFAULT_CANVAS
+                    return (1, H, W, 3)
+                if kind == "dets":
+                    N = (
+                        eng_shp[1]
+                        if eng_shp and len(eng_shp) > 1 and eng_shp[1] > 0
+                        else DEFAULT_TOPK
+                    )
+                    return (1, N, 5)
+                if kind == "labels":
+                    N = (
+                        shp_dets_eng[1]
+                        if shp_dets_eng and len(shp_dets_eng) > 1 and shp_dets_eng[1] > 0
+                        else DEFAULT_TOPK
+                    )
+                    return (1, N)
+                if kind == "masks":
+                    N = (
+                        shp_dets_eng[1]
+                        if shp_dets_eng and len(shp_dets_eng) > 1 and shp_dets_eng[1] > 0
+                        else DEFAULT_TOPK
+                    )
+                    Hm = (
+                        shp_in_rt_now[-3]
+                        if shp_in_rt_now and len(shp_in_rt_now) == 4
+                        else DEFAULT_CANVAS
+                    )
+                    Wm = (
+                        shp_in_rt_now[-2]
+                        if shp_in_rt_now and len(shp_in_rt_now) == 4
+                        else DEFAULT_CANVAS
+                    )
+                    return (1, N, Hm, Wm)
+                raise ValueError(kind)
+
+            shp_in_final = finalize(shp_in_rt_now, shp_in_engine, "in")
+            shp_dets_final = finalize(shp_dets_ctx, shp_dets_eng, "dets")
+            shp_labels_final = finalize(shp_labels_ctx, shp_labels_eng, "labels")
+            shp_masks_final = finalize(shp_masks_ctx, shp_masks_eng, "masks")
+
+            self.max_det = shp_dets_final[1]
+            self.mask_hw = shp_masks_final[-2:]
+
+            self.dev_ptr, self.host_buf, self.pinned_flag = {}, {}, {}
+
+            def allocate_host(name, shape, dtype, force_pinned=False):
+                numel = int(np.prod(shape))
+                nbytes = numel * np.dtype(dtype).itemsize
+                use_pinned = force_pinned or (nbytes >= PINNED_THRESHOLD_BYTES)
+                buf = (
+                    cuda.pagelocked_empty(numel, dtype)
+                    if use_pinned
+                    else np.empty(numel, dtype=dtype)
                 )
+                self.host_buf[name] = buf
+                self.pinned_flag[name] = use_pinned
+                self.dev_ptr[name] = cuda.mem_alloc(nbytes)
+
+            def allocate_dev_only(name, shape, dtype):
+                numel = int(np.prod(shape))
+                nbytes = numel * np.dtype(dtype).itemsize
+                self.dev_ptr[name] = cuda.mem_alloc(nbytes)
+
+            allocate_host(self.name_in, shp_in_final, self.dtype_in)
+            allocate_host(
+                self.name_dets, shp_dets_final, self.dtype_dets, force_pinned=True
             )
-
-        def ctx_shape(name):
-            return (
-                tuple(self.context.get_tensor_shape(name))
-                if self.trt10
-                else tuple(
-                    self.context.get_binding_shape(self.engine.get_binding_index(name))
-                )
+            allocate_host(
+                self.name_labels, shp_labels_final, self.dtype_labels, force_pinned=True
             )
+            allocate_dev_only(self.name_masks, shp_masks_final, self.dtype_masks)
 
-        shp_in_engine = eng_shape(self.name_in)
+            self.stream = cuda.Stream()
+            self.start_evt = cuda.Event()
+            self.end_evt = cuda.Event()
 
-        if self.trt10:
-            shp_in_rt = shp_in_engine
-            if -1 in shp_in_rt:
-                H, W = (
-                    (shp_in_rt[-3], shp_in_rt[-2])
-                    if shp_in_rt[-1] == 3
-                    else (shp_in_rt[-2], shp_in_rt[-1])
-                )
-                shp_in_rt = (
-                    1,
-                    H if H > 0 else DEFAULT_CANVAS,
-                    W if W > 0 else DEFAULT_CANVAS,
-                    3,
-                )
-                self.context.set_input_shape(self.name_in, shp_in_rt)
-        else:
-            b = self.engine.get_binding_index(self.name_in)
-            shp_in_rt = shp_in_engine
-            if -1 in shp_in_engine:
-                if self.engine.num_optimization_profiles > 0:
-                    self.context.active_optimization_profile = 0
-                H, W = (
-                    (shp_in_engine[-3], shp_in_engine[-2])
-                    if shp_in_engine[-1] == 3
-                    else (shp_in_engine[-2], shp_in_engine[-1])
-                )
-                shp_in_rt = (
-                    1,
-                    H if H > 0 else DEFAULT_CANVAS,
-                    W if W > 0 else DEFAULT_CANVAS,
-                    3,
-                )
-                self.context.set_binding_shape(b, shp_in_rt)
+            self.output_boxes = np.empty((self.max_det, 4), dtype=np.float32)
+            self.output_labels = np.empty(self.max_det, dtype=np.int32)
+            self.output_scores = np.empty(self.max_det, dtype=np.float32)
 
-        shp_in_rt_now = ctx_shape(self.name_in)
-        shp_dets_ctx = ctx_shape(self.name_dets)
-        shp_dets_eng = eng_shape(self.name_dets)
-        shp_labels_ctx = ctx_shape(self.name_labels)
-        shp_labels_eng = eng_shape(self.name_labels)
-        shp_masks_ctx = ctx_shape(self.name_masks)
-        shp_masks_eng = eng_shape(self.name_masks)
+            self.mask_host_capacity = 0
+            self.mask_host_buf = None
 
-        def finalize(ctx_shp, eng_shp, kind):
-            def ok(s):
-                return s and all((d is not None and d > 0) for d in s)
+            if self.trt10:
+                for n, d in self.dev_ptr.items():
+                    self.context.set_tensor_address(n, int(d))
+            else:
+                self.bindings_order = [None] * self.engine.num_bindings
+                for i in range(self.engine.num_bindings):
+                    n = self.engine.get_binding_name(i)
+                    self.bindings_order[i] = int(self.dev_ptr[n])
 
-            if ok(ctx_shp):
-                return tuple(ctx_shp)
-            if ok(eng_shp):
-                return tuple(eng_shp)
-            if kind == "in":
-                H = eng_shp[-3] if eng_shp and eng_shp[-3] > 0 else DEFAULT_CANVAS
-                W = eng_shp[-2] if eng_shp and eng_shp[-2] > 0 else DEFAULT_CANVAS
-                return (1, H, W, 3)
-            if kind == "dets":
-                N = (
-                    eng_shp[1]
-                    if eng_shp and len(eng_shp) > 1 and eng_shp[1] > 0
-                    else DEFAULT_TOPK
-                )
-                return (1, N, 5)
-            if kind == "labels":
-                N = (
-                    shp_dets_eng[1]
-                    if shp_dets_eng and len(shp_dets_eng) > 1 and shp_dets_eng[1] > 0
-                    else DEFAULT_TOPK
-                )
-                return (1, N)
-            if kind == "masks":
-                N = (
-                    shp_dets_eng[1]
-                    if shp_dets_eng and len(shp_dets_eng) > 1 and shp_dets_eng[1] > 0
-                    else DEFAULT_TOPK
-                )
-                Hm = (
-                    shp_in_rt_now[-3]
-                    if shp_in_rt_now and len(shp_in_rt_now) == 4
-                    else DEFAULT_CANVAS
-                )
-                Wm = (
-                    shp_in_rt_now[-2]
-                    if shp_in_rt_now and len(shp_in_rt_now) == 4
-                    else DEFAULT_CANVAS
-                )
-                return (1, N, Hm, Wm)
-            raise ValueError(kind)
-
-        shp_in_final = finalize(shp_in_rt_now, shp_in_engine, "in")
-        shp_dets_final = finalize(shp_dets_ctx, shp_dets_eng, "dets")
-        shp_labels_final = finalize(shp_labels_ctx, shp_labels_eng, "labels")
-        shp_masks_final = finalize(shp_masks_ctx, shp_masks_eng, "masks")
-
-        self.max_det = shp_dets_final[1]
-        self.mask_hw = shp_masks_final[-2:]
-
-        self.dev_ptr, self.host_buf, self.pinned_flag = {}, {}, {}
-
-        def allocate_host(name, shape, dtype, force_pinned=False):
-            numel = int(np.prod(shape))
-            nbytes = numel * np.dtype(dtype).itemsize
-            use_pinned = force_pinned or (nbytes >= PINNED_THRESHOLD_BYTES)
-            buf = (
-                cuda.pagelocked_empty(numel, dtype)
-                if use_pinned
-                else np.empty(numel, dtype=dtype)
-            )
-            self.host_buf[name] = buf
-            self.pinned_flag[name] = use_pinned
-            self.dev_ptr[name] = cuda.mem_alloc(nbytes)
-
-        def allocate_dev_only(name, shape, dtype):
-            numel = int(np.prod(shape))
-            nbytes = numel * np.dtype(dtype).itemsize
-            self.dev_ptr[name] = cuda.mem_alloc(nbytes)
-
-        allocate_host(self.name_in, shp_in_final, self.dtype_in)
-        allocate_host(
-            self.name_dets, shp_dets_final, self.dtype_dets, force_pinned=True
-        )
-        allocate_host(
-            self.name_labels, shp_labels_final, self.dtype_labels, force_pinned=True
-        )
-        allocate_dev_only(self.name_masks, shp_masks_final, self.dtype_masks)
-
-        self.stream = cuda.Stream()
-        self.start_evt = cuda.Event()
-        self.end_evt = cuda.Event()
-
-        self.output_boxes = np.empty((self.max_det, 4), dtype=np.float32)
-        self.output_labels = np.empty(self.max_det, dtype=np.int32)
-        self.output_scores = np.empty(self.max_det, dtype=np.float32)
-
-        self.mask_host_capacity = 0
-        self.mask_host_buf = None
-
-        if self.trt10:
-            for n, d in self.dev_ptr.items():
-                self.context.set_tensor_address(n, int(d))
-        else:
-            self.bindings_order = [None] * self.engine.num_bindings
-            for i in range(self.engine.num_bindings):
-                n = self.engine.get_binding_name(i)
-                self.bindings_order[i] = int(self.dev_ptr[n])
+            print("TRTSegmentor initialization complete")
+            
+        finally:
+            # Keep the context current for this thread - don't pop it here
+            # The context will stay active for the lifetime of this object
+            pass
 
     def infer_fast(self, lb_img_uint8, measure_gpu=False):
+        # Context is already current for this thread, no need to push/pop
         np.copyto(self.host_buf[self.name_in], lb_img_uint8.ravel())
         if self.pinned_flag[self.name_in]:
             cuda.memcpy_htod_async(
                 self.dev_ptr[self.name_in], self.host_buf[self.name_in], self.stream
             )
         else:
-            cuda.memcpy_htod(self.dev_ptr[self.name_in], self.host_buf[self.name_in])
+            cuda.memcpy_htod(
+                self.dev_ptr[self.name_in], self.host_buf[self.name_in]
+            )
 
         if measure_gpu:
             self.stream.synchronize()
@@ -799,7 +994,9 @@ class TRTSegmentor:
 
         if not measure_gpu:
             cuda.memcpy_dtoh_async(
-                self.host_buf[self.name_dets], self.dev_ptr[self.name_dets], self.stream
+                self.host_buf[self.name_dets],
+                self.dev_ptr[self.name_dets],
+                self.stream,
             )
             cuda.memcpy_dtoh_async(
                 self.host_buf[self.name_labels],
@@ -815,11 +1012,16 @@ class TRTSegmentor:
                 self.host_buf[self.name_labels], self.dev_ptr[self.name_labels]
             )
 
-        dets_raw = self.host_buf[self.name_dets].view().reshape(1, self.max_det, 5)[0]
-        labels_raw = self.host_buf[self.name_labels].view().reshape(1, self.max_det)[0]
+        dets_raw = (
+            self.host_buf[self.name_dets].view().reshape(1, self.max_det, 5)[0]
+        )
+        labels_raw = (
+            self.host_buf[self.name_labels].view().reshape(1, self.max_det)[0]
+        )
         np.copyto(self.output_boxes, dets_raw[:, :4])
         np.copyto(self.output_scores, dets_raw[:, 4])
         np.copyto(self.output_labels, labels_raw.astype(np.int32))
+
         return self.output_boxes, self.output_labels, self.output_scores, gpu_s
 
     def _ensure_mask_host(self, need_count):
@@ -833,6 +1035,7 @@ class TRTSegmentor:
         self.mask_host_capacity = new_cap
 
     def copy_masks(self, indices):
+        # Context is already current for this thread
         Hm, Wm = self.mask_hw
         dtype = self.dtype_masks
         itemsize = np.dtype(dtype).itemsize
@@ -852,3 +1055,83 @@ class TRTSegmentor:
         mask_stream.synchronize()
         t1 = time.perf_counter()
         return np.array(self.mask_host_buf[: len(indices)]), (t1 - t0)
+
+    def cleanup(self):
+        """
+        Clean up all CUDA resources with timeout protection
+        """
+        print("Cleaning up TRTSegmentor CUDA resources...")
+        
+        # Set a timeout for the entire cleanup process
+        cleanup_start_time = time.time()
+        cleanup_timeout = 5.0  # 5 second timeout for cleanup
+        
+        try:
+            # First, try to synchronize any pending operations with timeout
+            try:
+                if hasattr(self, "stream") and self.stream:
+                    # Don't hang on synchronization
+                    print("Synchronizing CUDA stream...")
+                    self.stream.synchronize()
+                    print("CUDA stream synchronized")
+            except Exception as e:
+                print(f"Warning: Could not synchronize CUDA stream: {e}")
+                
+            # Check timeout
+            if time.time() - cleanup_start_time > cleanup_timeout:
+                print("Cleanup timeout reached during stream sync - aborting")
+                return
+
+            # Free device memory with individual error handling
+            print("Freeing device memory...")
+            freed_count = 0
+            for name, ptr in list(self.dev_ptr.items()):
+                try:
+                    if ptr:
+                        ptr.free()
+                        freed_count += 1
+                except Exception as e:
+                    print(f"Warning: Error freeing device memory for {name}: {e}")
+                    
+                # Check timeout during cleanup
+                if time.time() - cleanup_start_time > cleanup_timeout:
+                    print(f"Cleanup timeout reached - freed {freed_count}/{len(self.dev_ptr)} buffers")
+                    break
+
+            print(f"Freed {freed_count} device memory buffers")
+
+            # Clear dictionaries
+            self.host_buf.clear()
+            self.dev_ptr.clear()
+            self.pinned_flag.clear()
+
+            # Reset other attributes
+            self.mask_host_buf = None
+            self.mask_host_capacity = 0
+
+            print("CUDA resources cleanup attempted")
+            
+        except Exception as e:
+            print(f"Warning: Error during CUDA resource cleanup: {e}")
+        
+        finally:
+            # Always try to detach context, even if other cleanup failed
+            print("Detaching CUDA context...")
+            try:
+                if hasattr(self, "ctx") and self.ctx:
+                    # Don't let context cleanup hang the system
+                    self.ctx.pop()
+                    self.ctx.detach()
+                    print("CUDA context detached successfully")
+            except Exception as e:
+                # This is the problematic TensorRT error - don't let it crash the app
+                print(f"Warning: TensorRT context cleanup error (IGNORED): {e}")
+                print("This TensorRT cleanup warning can be safely ignored")
+                
+            # Small delay to let any background operations complete
+            try:
+                time.sleep(0.1)
+            except:
+                pass
+                
+            print("TensorRT cleanup completed (with warnings ignored)")

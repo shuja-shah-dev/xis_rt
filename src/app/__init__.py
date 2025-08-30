@@ -258,6 +258,7 @@ def create_app():
 
     print("Flask application created successfully")
     print(f"GenICam service: {'Initialized' if _genicam_service else 'Failed'}")
+    init_video_service_rd(app=app, socketio=socketio)
 
     return app
 
