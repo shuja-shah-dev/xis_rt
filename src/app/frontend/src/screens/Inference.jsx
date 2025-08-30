@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useRef } from "react";
 import { io } from "socket.io-client";
 
-const Inference = () => {
+const Inference = ({ setActiveScreen, disconnectStream, socketRef }) => {
   const [streaming, setStreaming] = useState(false);
   const [socket, setSocket] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
-  const socketRef = useRef(null);
+  const [disconnecting, setDisconnecting] = useState(false);
+
   useEffect(() => {
     if (streaming && !socketRef.current) {
       const newSocket = io("http://localhost:5000/ws", {
@@ -82,7 +83,7 @@ const Inference = () => {
   const startStream = async () => {
     try {
       console.log("Btn pressed")
-      // setStreaming(true);
+
       const res = await fetch("http://localhost:5000/api/stream/normal", {
         method: "POST",
         headers: {
@@ -106,65 +107,17 @@ const Inference = () => {
     }
   };
 
-  const startInferenceStream = async () => {
-    try {
-      const res = await fetch("http://localhost:5000/api/stream/inference", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        }
-      });
+  const handleDisconnect = async () => {
+    setDisconnecting(true); 
+    await disconnectStream();
+  
+    setConnectionStatus("Disconnected");
 
-      const data = await res.json();
-
-      if (res.ok) {
-        console.log("Inference stream started successfully:", data);
-        setStreaming(true);
-      } else {
-        console.error("Failed to start inference stream:", data);
-        alert(`Failed to start inference stream: ${data.message || 'Unknown error'}`);
-      }
-    } catch (err) {
-      console.error("Error starting inference stream:", err);
-      alert(`Error starting inference stream: ${err.message}`);
-    }
-  };
-
-  const stopStream = async () => {
-    try {
-      const res = await fetch("http://localhost:5000/api/stream/stop", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        }
-      });
-
-      const data = await res.json();
-
-      if (res.ok) {
-        console.log("Stream stopped successfully:", data);
+    setTimeout(() => {
+      setDisconnecting(false);
         setStreaming(false);
-
-        if (socketRef.current) {
-          socketRef.current.disconnect();
-          socketRef.current = null;
-          setSocket(null);
-          setConnectionStatus("Disconnected");
-        }
-      } else {
-        console.error("Failed to stop stream:", data);
-        alert(`Failed to stop stream: ${data.message || 'Unknown error'}`);
-      }
-    } catch (err) {
-      console.error("Error stopping stream:", err);
-      alert(`Error stopping stream: ${err.message}`);
-    }
-  };
-
-  const setConfidence = (value) => {
-    if (socketRef.current && socketRef.current.connected) {
-      socketRef.current.emit("set_confidence", { value: parseFloat(value) });
-    }
+      setActiveScreen("Camera");
+    }, 2000);
   };
 
   return (
@@ -180,8 +133,8 @@ const Inference = () => {
             id="camera-stream"
             alt="Inference"
             className={`rounded-xl transition-all duration-300 ${streaming
-                ? "object-none w-full h-full"
-                : "w-10 h-10 object-contain"
+              ? "object-none w-full h-full"
+              : "w-10 h-10 object-contain"
               }`}
             src={streaming ? undefined : "/play.svg"}
           />
@@ -198,31 +151,27 @@ const Inference = () => {
       </div>
 
       <div className="mt-6 flex gap-4 justify-end">
-        {/* <button 
-          onClick={() => setConfidence(0.5)}
-          className="px-5 py-2 rounded-xl bg-[#4061A9] text-white cursor-pointer"
+
+
+         {!streaming ? (
+        <button
+          onClick={startStream}
+          className="px-5 py-2 rounded-xl bg-[#1272E5] text-white text-md cursor-pointer"
         >
-          Set Confidence 0.5
-        </button> */}
+          Start Inference
+        </button>
+      ) : (
+        <button
+          onClick={handleDisconnect}
+          disabled={disconnecting}
+          className={`px-5 py-2 rounded-xl text-white text-md cursor-pointer ${
+            disconnecting ? "bg-gray-500" : "bg-[#dc2626]"
+          }`}
+        >
+          {disconnecting ? "Disconnecting..." : "Disconnect"}
+        </button>
+      )}
 
-        {!streaming ? (
-          <>
-            <button
-              onClick={startStream}
-              className="px-5 py-2 rounded-xl bg-[#1272E5] text-white text-md cursor-pointer"
-            >
-              Start Inference
-            </button>
-
-          </>
-        ) : (
-          <button
-            onClick={stopStream}
-            className="px-5 py-2 rounded-xl bg-[#dc2626] text-white text-md cursor-pointer"
-          >
-            Stop Stream
-          </button>
-        )}
       </div>
 
       {streaming && (

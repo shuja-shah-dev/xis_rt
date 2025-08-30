@@ -966,7 +966,7 @@ class TensorRTGenICamDetector:
                     # Add FPS text to visualization
                     cv2.putText(
                         vis,
-                        f"{disp_fps:5.0f} DISPLAY FPS",
+                        f" ",
                         (10, 78),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.6,
