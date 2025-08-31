@@ -37,9 +37,9 @@ class AppConfig:
             self.video_on = "raw_dough"
         elif src == "donut":
             self.video_path = os.path.join(
-                os.path.dirname(__file__), "runtime_videos", "raw_dough.avi"
+                os.path.dirname(__file__), "runtime_videos", "donut.avi"
             )
-            self.video_on = "raw_dough"
+            self.video_on = "donut"
 
         self.cti_file_location = None
 
@@ -79,6 +79,11 @@ class AppConfig:
             return os.path.join(
                 os.path.dirname(__file__), "runtime_models", "generic.engine"
             )
+        elif self.model_selection == "donut":
+            return os.path.join(
+                os.path.dirname(__file__), "runtime_models", "donut.engine"
+            )
+
 
     def validate_config(self):
         if not self.input_type:

@@ -26,6 +26,12 @@ def get_video_service_rd():
     return video_service
 
 
+def get_video_dont():
+    from app import dont_service
+
+    return dont_service
+
+
 def get_video_service_bkd():
     from app import bked_service
 
@@ -96,6 +102,32 @@ def start_normal_stream():
             elif RUNTIME_CONFIG.get("video_mode") == "baked_baguette":
 
                 video_service = get_video_service_bkd()
+                video_service.stop_processing()
+                if video_service.initialize_from_config(RUNTIME_CONFIG):
+                    if video_service.start_processing():
+                        return (
+                            jsonify(
+                                {
+                                    "status": "success",
+                                    "message": "Video processing started",
+                                }
+                            ),
+                            200,
+                        )
+                    else:
+                        return (
+                            jsonify(
+                                {
+                                    "status": "error",
+                                    "message": "Could not start processing",
+                                }
+                            ),
+                            500,
+                        )
+
+            elif RUNTIME_CONFIG.get("video_mode") == "donut":
+
+                video_service = get_video_dont()
                 video_service.stop_processing()
                 if video_service.initialize_from_config(RUNTIME_CONFIG):
                     if video_service.start_processing():
@@ -200,6 +232,22 @@ def stop_stream():
                 )
             elif config["VIDEO_MODE"] == "baked_baguette":
                 video_service = get_video_service_bkd()
+                video_service.stop_processing()
+                success = True
+                result = (
+                    "Stream stopped successfully"
+                    if success
+                    else "Failed to stop stream"
+                )
+                status_code = 200 if success else 500
+                return (
+                    jsonify(
+                        {"status": "success" if success else "error", "message": result}
+                    ),
+                    status_code,
+                )
+            elif config["VIDEO_MODE"] == "donut":
+                video_service = get_video_dont()
                 video_service.stop_processing()
                 success = True
                 result = (

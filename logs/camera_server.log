@@ -198,3 +198,19 @@ TypeError: The view function for 'inference.stop_stream' did not return a valid 
 2025-08-31 16:25:02,803 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
 2025-08-31 16:28:42,476 ERROR: Unhandled exception: [Errno 13] Permission denied: 'cti\\ids_u3vgentlk.cti' [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
 2025-08-31 16:32:18,485 ERROR: Unhandled exception: [Errno 13] Permission denied: 'cti\\ids_u3vgentlk.cti' [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
+2025-08-31 20:42:35,234 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 20:42:45,733 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
+2025-08-31 21:23:47,080 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 21:26:12,302 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 21:26:17,715 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:230]
+2025-08-31 21:26:28,869 ERROR: Exception on /api/stream/normal [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.start_normal_stream' did not return a valid response. The function either returned None or ended without a return statement.
