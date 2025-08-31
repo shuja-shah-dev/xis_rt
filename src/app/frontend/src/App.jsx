@@ -9,6 +9,7 @@ import { BlobLarge } from "./components/Blob";
 
 function App() {
   const [activeScreen, setActiveScreen] = useState("Camera");
+  const [selectedVideo, setSelectedVideo] = useState(null);
    const socketRef = useRef(null); 
   const prevScreenRef = useRef(null);
   
@@ -51,9 +52,9 @@ function App() {
   const renderScreen = () => {
     switch (activeScreen) {
       case "Camera":
-        return <Camera setActiveScreen={setActiveScreen} />;
+        return <Camera setActiveScreen={setActiveScreen}   setSelectedVideo={setSelectedVideo} />;
       case "Model":
-        return <Model setActiveScreen={setActiveScreen} />;
+        return <Model setActiveScreen={setActiveScreen}  selectedVideo={selectedVideo}/>;
       case "Inference":
         return <Inference  setActiveScreen={setActiveScreen}
             disconnectStream={disconnectStream}

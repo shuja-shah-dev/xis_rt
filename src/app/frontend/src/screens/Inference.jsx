@@ -6,6 +6,16 @@ const Inference = ({ setActiveScreen, disconnectStream, socketRef }) => {
   const [socket, setSocket] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
   const [disconnecting, setDisconnecting] = useState(false);
+  const [videoEnded, setVideoEnded] = useState(false);
+  const [selectedCamera, setSelectedCamera] = useState(null);
+
+  useEffect(() => {
+    const savedSelected = localStorage.getItem("selectedCamera");
+    if (savedSelected) {
+      const { id, name } = JSON.parse(savedSelected);
+      setSelectedCamera(name);
+    }
+  }, []);
 
   useEffect(() => {
     if (streaming && !socketRef.current) {
@@ -34,10 +44,11 @@ const Inference = ({ setActiveScreen, disconnectStream, socketRef }) => {
         console.log("Status update:", data);
       });
 
-      newSocket.on('video_ended',(data) => {
+      newSocket.on('video_ended', (data) => {
         console.log('succesffully reached video_ended event')
         console.log(data);
-        
+        setVideoEnded(true);
+
       });
 
       newSocket.on("stream_frame", (data) => {
@@ -114,14 +125,14 @@ const Inference = ({ setActiveScreen, disconnectStream, socketRef }) => {
   };
 
   const handleDisconnect = async () => {
-    setDisconnecting(true); 
+    setDisconnecting(true);
     await disconnectStream();
-  
+
     setConnectionStatus("Disconnected");
 
     setTimeout(() => {
       setDisconnecting(false);
-        setStreaming(false);
+      setStreaming(false);
       setActiveScreen("Camera");
     }, 2000);
   };
@@ -159,24 +170,35 @@ const Inference = ({ setActiveScreen, disconnectStream, socketRef }) => {
       <div className="mt-6 flex gap-4 justify-end">
 
 
-         {!streaming ? (
-        <button
-          onClick={startStream}
-          className="px-5 py-2 rounded-xl bg-[#1272E5] text-white text-md cursor-pointer"
-        >
-          Start Inference
-        </button>
-      ) : (
-        <button
-          onClick={handleDisconnect}
-          disabled={disconnecting}
-          className={`px-5 py-2 rounded-xl text-white text-md cursor-pointer ${
-            disconnecting ? "bg-gray-500" : "bg-[#dc2626]"
-          }`}
-        >
-          {disconnecting ? "Disconnecting..." : "Disconnect"}
-        </button>
-      )}
+        {!streaming ? (
+          <button
+            onClick={startStream}
+            className="px-5 py-2 rounded-xl bg-[#1272E5] text-white text-md cursor-pointer"
+          >
+            Start Inference
+          </button>
+        ) : (
+          <button
+            onClick={handleDisconnect}
+            disabled={
+              disconnecting ||
+              (selectedCamera === "Video As Webcam" && !videoEnded)
+            }
+            className={`px-5 py-2 rounded-xl text-white text-md transition-colors ${disconnecting || (selectedCamera === "Video As Webcam" && !videoEnded)
+                ? "bg-gray-500 cursor-not-allowed"
+                : "bg-[#dc2626] hover:bg-red-700 cursor-pointer"
+              }`}
+            title={
+              disconnecting
+                ? "Currently disconnecting..."
+                : selectedCamera === "Video As Webcam" && !videoEnded
+                  ? "Please let inference finish before disconnecting"
+                  : ""
+            }
+          >
+            {disconnecting ? "Disconnecting..." : "Disconnect"}
+          </button>
+        )}
 
       </div>
 

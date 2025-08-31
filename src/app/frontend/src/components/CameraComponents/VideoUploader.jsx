@@ -8,6 +8,7 @@ const VideoUploader = ({ onNext, onBack }) => {
   const options = [
     { id: "raw", name: "Raw Dough", apiValue: "raw_dough" },
     { id: "baked", name: "Baked Baguette", apiValue: "baked_baguette" },
+     { id: "donut", name: "Donut", apiValue: "donut" },
   ];
 
   const handleSelect = async (id, apiValue) => {
@@ -86,11 +87,11 @@ const VideoUploader = ({ onNext, onBack }) => {
           Select Camera
         </button>
         <button
-          onClick={onNext}
+         onClick={() => onNext(selected)} 
           disabled={!selected || loading}
           className={`px-5 py-2 rounded-xl bg-[#1272E5] text-white text-md cursor-pointer disabled:opacity-50`}
         >
-          Preview
+          Next
         </button>
       </div>
     </div>

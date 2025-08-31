@@ -16,7 +16,7 @@ class AppConfig:
         self.video_path = None
         self.cti_file_location = None
         self.input_type = None
-        self.video_on = ''
+        self.video_on = ""
 
     def set_camera_config(self, cti_file_location):
         self.input_type = "camera"
@@ -29,17 +29,22 @@ class AppConfig:
             self.video_path = os.path.join(
                 os.path.dirname(__file__), "runtime_videos", "baked_baguette.avi"
             )
-            self.video_on = 'baked_baguette'
+            self.video_on = "baked_baguette"
         elif src == "raw_dough":
             self.video_path = os.path.join(
                 os.path.dirname(__file__), "runtime_videos", "raw_dough.avi"
             )
-            self.video_on = 'raw_dough'
+            self.video_on = "raw_dough"
+        elif src == "donut":
+            self.video_path = os.path.join(
+                os.path.dirname(__file__), "runtime_videos", "raw_dough.avi"
+            )
+            self.video_on = "raw_dough"
 
         self.cti_file_location = None
 
     def set_model_selection(self, model_name):
-        valid_models = ["raw_dough", "baked_baguette", "generic"]
+        valid_models = ["raw_dough", "baked_baguette", "generic", "donut"]
         if model_name in valid_models:
             self.model_selection = model_name
         else:
@@ -55,7 +60,7 @@ class AppConfig:
             "cti_file_location": self.cti_file_location,
             "VIDEO_ENGINE_PATH": engine,
             "VIDEO_INPUT_PATH": self.video_path,
-            "VIDEO_MODE": self.video_on
+            "VIDEO_MODE": self.video_on,
         }
 
     def get_cti(self):

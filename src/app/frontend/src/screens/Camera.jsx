@@ -3,7 +3,7 @@ import CameraSelector from "../components/CameraComponents/CameraSelector";
 import CTIUploader from "../components/CameraComponents/CTIUploader";
 import VideoUploader from "../components/CameraComponents/VideoUploader";
 
-const Camera = ({ setActiveScreen }) => {
+const Camera = ({ setActiveScreen, setSelectedVideo  }) => {
   const [step, setStep] = useState(1);
   const [cameraType, setCameraType] = useState({ id: null, name: "" });
 
@@ -61,13 +61,19 @@ const Camera = ({ setActiveScreen }) => {
         {step === 2 &&
           (cameraType.id === "video" ? (
             <VideoUploader
-              onNext={() => setActiveScreen("Model")}
+              onNext={(videoId) => {        
+              setSelectedVideo(videoId);  
+              setActiveScreen("Model");
+            }}
               onBack={() => setStep(1)}
             />
           ) : (
             <CTIUploader
               cameraName={cameraType.name}
-              onNext={() => setActiveScreen("Model")}
+               onNext={() => {
+          setSelectedVideo(null);      
+          setActiveScreen("Model");
+        }}
               onBack={() => setStep(1)}
             />
           ))}

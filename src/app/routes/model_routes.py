@@ -9,7 +9,7 @@ app_config = AppConfig()
 def select_model():
     data = request.get_json()
     model_name = data.get("model_name")
-    valid_model_names = ["raw_dough", "baked_baguette", "generic"]
+    valid_model_names = ["raw_dough", "baked_baguette", "generic", "donut"]
     if model_name not in valid_model_names:
         return jsonify({"status": "error", "message": "Invalid model selection"})
     try:

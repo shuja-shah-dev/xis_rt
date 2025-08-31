@@ -276,7 +276,7 @@ def set_src_video():
 
         video_value = data["video"]
 
-        allowed_videos = ["raw_dough", "baked_baguette"]
+        allowed_videos = ["raw_dough", "baked_baguette", "donut"]
         if video_value not in allowed_videos:
             return (
                 jsonify(

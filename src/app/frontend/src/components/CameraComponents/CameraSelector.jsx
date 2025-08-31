@@ -198,7 +198,7 @@ const CameraSelector = ({ onNext }) => {
           );
         })}
 
-        {/* + Button (always last) */}
+       
         <div
           onClick={() => setIsModalOpen(true)}
           className="cursor-pointer w-[335px] h-[160px] flex items-center justify-center border-2 rounded-[12px] border-[#0E2332] bg-[rgba(0,0,0,0.04)]  hover:border-[#1272E5]"
@@ -207,7 +207,6 @@ const CameraSelector = ({ onNext }) => {
         </div>
       </div>
 
-      {/* Modal */}
       {isModalOpen && (
         <div className="absolute top-2 left-[36%] bg-black/50 flex items-center justify-center z-50">
           <div
