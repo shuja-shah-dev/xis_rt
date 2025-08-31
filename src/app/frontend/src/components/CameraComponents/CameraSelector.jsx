@@ -26,7 +26,7 @@ const CameraSelector = ({ onNext }) => {
     }
   }, []);
 
-  // Close modal when clicking outside
+
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (modalRef.current && !modalRef.current.contains(event.target)) {
@@ -87,7 +87,7 @@ const CameraSelector = ({ onNext }) => {
       <p className="text-2xl">Choose Your Camera</p>
 
       <div className="flex gap-10 flex-wrap">
-        {/* Base Camera (fixed webcam) */}
+   
         {baseCameras.map((camera) => {
           const isSelected = selected === camera.id;
           const status = isSelected ? "Connected" : "Not Connected";

@@ -64,6 +64,7 @@ def start_normal_stream():
             }
             if RUNTIME_CONFIG.get("video_mode") == "raw_dough":
                 video_service = get_video_service_rd()
+                video_service.stop_processing()
                 if video_service.initialize_from_config(RUNTIME_CONFIG):
                     if video_service.start_processing():
                         return (
@@ -95,6 +96,7 @@ def start_normal_stream():
             elif RUNTIME_CONFIG.get("video_mode") == "baked_baguette":
 
                 video_service = get_video_service_bkd()
+                video_service.stop_processing()
                 if video_service.initialize_from_config(RUNTIME_CONFIG):
                     if video_service.start_processing():
                         return (
