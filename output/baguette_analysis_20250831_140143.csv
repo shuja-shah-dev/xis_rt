@@ -1,0 +1,2 @@
+tray_number,timestamp,number_of_defected,number_of_good,number_of_missing,total_detected
+Tray 1,1.8s,3,36,0,39

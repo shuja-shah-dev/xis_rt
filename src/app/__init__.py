@@ -13,6 +13,7 @@ import sys
 from app.core.config import AppConfig
 import threading
 from app.core.video_service.raw_dough import VideoInferenceService
+from app.core.video_service.baked_baguette import VideoInferenceService_baked
 
 
 app_config = AppConfig()
@@ -259,12 +260,13 @@ def create_app():
     print("Flask application created successfully")
     print(f"GenICam service: {'Initialized' if _genicam_service else 'Failed'}")
     init_video_service_rd(app=app, socketio=socketio)
+    init_video_service_bk(app=app, socketio=socketio)
 
     return app
 
 
 video_service = None
-
+bked_service =None
 
 def init_video_service_rd(app, socketio):
     global video_service
@@ -318,6 +320,61 @@ def init_video_service_rd(app, socketio):
         socketio.emit("video_status", status, namespace="/ws")
 
     return video_service
+
+
+def init_video_service_bk(app, socketio):
+    global bked_service
+    bked_service = VideoInferenceService_baked(websocket_mode=True)
+    bked_service.set_socketio(socketio)
+    bked_service.set_mqtt(mqtt)
+
+    @socketio.on("start_video_processing", namespace="/ws")
+    def handle_start_video(data):
+        config = {
+            "engine_path": data.get("engine_path", app.config.get("VIDEO_ENGINE_PATH")),
+            "video_path": data.get("video_path", app.config.get("VIDEO_INPUT_PATH")),
+            "score_threshold": data.get("score_threshold", 0.4),
+            "score_class0": data.get("score_class0"),
+            "score_class1": data.get("score_class1"),
+            "nms_threshold": data.get("nms_threshold", 0.5),
+            "mask_threshold": data.get("mask_threshold", 0.4),
+            "canvas_size": data.get("canvas_size", 640),
+            "alpha": data.get("alpha", 0.3),
+            "min_inference_frames": data.get("min_inference_frames", 30),
+            "target_fps": data.get("target_fps", 30.0),
+            "mqtt_topic": data.get("mqtt_topic", "detection/results"),
+        }
+
+        if bked_service.initialize_from_config(config):
+            if bked_service.start_processing():
+                socketio.emit("video_status", {"status": "started"}, namespace="/ws")
+            else:
+                socketio.emit(
+                    "video_status",
+                    {"status": "failed", "error": "Could not start processing"},
+                    namespace="/ws",
+                )
+        else:
+            socketio.emit(
+                "video_status",
+                {"status": "failed", "error": "Initialization failed"},
+                namespace="/ws",
+            )
+
+    @socketio.on("stop_video_processing", namespace="/ws")
+    def handle_stop_video():
+        if bked_service.stop_processing():
+            socketio.emit("video_status", {"status": "stopped"}, namespace="/ws")
+        else:
+            socketio.emit("video_status", {"status": "error"}, namespace="/ws")
+
+    @socketio.on("get_video_status", namespace="/ws")
+    def handle_get_status():
+        status = bked_service.get_status() if bked_service else {"is_running": False}
+        socketio.emit("video_status", status, namespace="/ws")
+
+    return bked_service
+
 
 
 def start_genicam_service_async(model_path, cti_file_path):

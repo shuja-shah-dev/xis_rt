@@ -26,6 +26,12 @@ def get_video_service_rd():
     return video_service
 
 
+def get_video_service_bkd():
+    from app import bked_service
+
+    return bked_service
+
+
 @inference_bp.route("/stream/normal", methods=["POST"])
 def start_normal_stream():
     """Start normal camera stream"""
@@ -87,15 +93,29 @@ def start_normal_stream():
                         500,
                     )
             elif RUNTIME_CONFIG.get("video_mode") == "baked_baguette":
-                return (
-                    jsonify(
-                        {
-                            "status": "error",
-                            "message": "Initialization failed, raw_dough is not defined yet",
-                        }
-                    ),
-                    400,
-                )
+
+                video_service = get_video_service_bkd()
+                if video_service.initialize_from_config(RUNTIME_CONFIG):
+                    if video_service.start_processing():
+                        return (
+                            jsonify(
+                                {
+                                    "status": "success",
+                                    "message": "Video processing started",
+                                }
+                            ),
+                            200,
+                        )
+                    else:
+                        return (
+                            jsonify(
+                                {
+                                    "status": "error",
+                                    "message": "Could not start processing",
+                                }
+                            ),
+                            500,
+                        )
 
         else:
 
@@ -155,31 +175,50 @@ def start_normal_stream():
 
 @inference_bp.route("/stream/stop", methods=["POST"])
 def stop_stream():
-    """Stop camera streaming"""
     config = app_config.get_config()
     success = False
+
     try:
         if config["input_type"] == "video":
-            if config.get("video_mode") == "raw_dough":
+            if config["VIDEO_MODE"] == "raw_dough":
                 video_service = get_video_service_rd()
                 video_service.stop_processing()
                 success = True
-                if success:
-                    result = "Stream stopped successfully"
-                    status_code = 200
+                result = (
+                    "Stream stopped successfully"
+                    if success
+                    else "Failed to stop stream"
+                )
+                status_code = 200 if success else 500
                 return (
                     jsonify(
-                        {
-                            "status": "success" if success else "error",
-                            "message": result,
-                            "service_status": genicam_service.get_status(),
-                        }
+                        {"status": "success" if success else "error", "message": result}
                     ),
                     status_code,
                 )
+            elif config["VIDEO_MODE"] == "baked_baguette":
+                video_service = get_video_service_bkd()
+                video_service.stop_processing()
+                success = True
+                result = (
+                    "Stream stopped successfully"
+                    if success
+                    else "Failed to stop stream"
+                )
+                status_code = 200 if success else 500
+                return (
+                    jsonify(
+                        {"status": "success" if success else "error", "message": result}
+                    ),
+                    status_code,
+                )
+            else:
+                return (
+                    jsonify({"status": "error", "message": "Unsupported video mode"}),
+                    400,
+                )
         else:
             print("Stopping stream request...")
-
             genicam_service = get_genicam_service()
 
             try:
@@ -193,7 +232,6 @@ def stop_stream():
                 stop_thread = threading.Thread(target=stop_async, daemon=True)
                 stop_thread.start()
                 success = True
-
             except Exception as e:
                 error_msg = f"Failed to stop GenICam service: {str(e)}"
                 print(error_msg)
@@ -203,7 +241,6 @@ def stop_stream():
             if success:
                 result = "Stream stopped successfully"
                 status_code = 200
-
             else:
                 result = "Failed to stop stream"
                 status_code = 500

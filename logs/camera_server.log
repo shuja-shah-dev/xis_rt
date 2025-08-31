@@ -62,3 +62,123 @@ Traceback (most recent call last):
   File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
     raise TypeError(
 TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-31 00:05:00,193 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 00:06:18,925 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-31 00:06:20,942 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-31 12:02:55,319 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 12:03:04,029 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:228]
+2025-08-31 12:07:36,164 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 12:07:53,151 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:228]
+2025-08-31 12:09:53,123 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-31 12:09:55,891 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-31 12:12:35,454 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 12:12:44,598 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:228]
+2025-08-31 12:12:46,613 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:228]
+2025-08-31 12:20:09,881 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-31 12:20:11,899 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-31 12:33:20,485 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 12:33:28,444 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:228]
+2025-08-31 12:34:44,548 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-31 12:34:46,572 ERROR: Exception on /api/stream/stop [POST] [in C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py:838]
+Traceback (most recent call last):
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1473, in wsgi_app
+    response = self.full_dispatch_request()
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 883, in full_dispatch_request
+    return self.finalize_request(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 902, in finalize_request
+    response = self.make_response(rv)
+  File "C:\Users\PC030\anaconda3\envs\mmdeploy3\lib\site-packages\flask\app.py", line 1174, in make_response
+    raise TypeError(
+TypeError: The view function for 'inference.stop_stream' did not return a valid response. The function either returned None or ended without a return statement.
+2025-08-31 12:44:29,679 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 12:44:38,326 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:228]
+2025-08-31 12:49:43,815 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 12:50:08,139 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:228]
+2025-08-31 12:58:13,233 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 13:41:07,394 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 13:41:13,084 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
+2025-08-31 13:53:44,129 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 13:53:54,110 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
+2025-08-31 13:59:59,396 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 14:00:10,807 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
+2025-08-31 14:35:41,225 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 14:35:47,873 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
+2025-08-31 14:36:13,847 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 14:38:24,599 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 14:38:30,696 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
+2025-08-31 14:39:47,846 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 14:39:55,694 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
+2025-08-31 14:40:35,405 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 14:40:43,572 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
+2025-08-31 15:02:39,332 INFO: Camera server startup [in src/app.py:34]
+2025-08-31 15:02:44,229 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:229]
