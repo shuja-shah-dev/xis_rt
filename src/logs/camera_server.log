@@ -210,3 +210,4 @@
 2025-09-01 12:25:25,911 INFO: Camera server startup [in app.py:34]
 2025-09-01 12:25:53,973 ERROR: Unhandled exception: [Errno 13] Permission denied: 'cti\\ids_u3vgentlk.cti' [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:264]
 2025-09-01 12:26:25,042 INFO: Camera server startup [in app.py:34]
+2025-09-01 12:30:41,233 INFO: Camera server startup [in app.py:34]
