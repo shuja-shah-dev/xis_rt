@@ -509,7 +509,7 @@ class VideoInferenceService:
                     self.current_fps = fps_counter.get_fps()
                     self.inference_active = inference_active
 
-                    self._add_fps_overlay(vis)
+                    # self._add_fps_overlay(vis)
                     self._emit_frame(
                         vis,
                         {
@@ -962,9 +962,11 @@ class VideoInferenceService:
         # Color based on class: 0=Green visual, 1=Red visual (same as standalone file)
         label_val = int(lab)
         if label_val == 0:
-            mask_color = (0, 255, 0)  # Green in BGR for defected (class 0)
+              # Green in BGR for defected (class 0)
+            mask_color = (0, 0, 255)
         else:
-            mask_color = (0, 0, 255)  # Red in BGR for good (class 1)
+            mask_color = (0, 255, 0)
+              # Red in BGR for good (class 1)
 
         # Create colored overlay
         color_roi = np.full_like(roi, mask_color)

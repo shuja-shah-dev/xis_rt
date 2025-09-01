@@ -453,7 +453,7 @@ class VideoInferenceService_baked:
                     self.current_fps = fps_counter.get_fps()
                     self.inference_active = inference_active
 
-                    self._add_fps_overlay(vis)
+                    # self._add_fps_overlay(vis)
                     cv2.putText(
                         vis,
                         f"Frame: {frame_idx} | Time: {current_timestamp:.1f}s",

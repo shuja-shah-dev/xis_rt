@@ -597,8 +597,8 @@ class VideoInferenceService_dont:
                     fps_counter.update()
                     self.current_fps = fps_counter.get_fps()
 
-                    self._add_fps_overlay(vis, width)
-                    self._add_info_overlay(vis, current_video_time_seconds, frame_idx, frame_count, width)
+                    # self._add_fps_overlay(vis, width)
+                    # self._add_info_overlay(vis, current_video_time_seconds, frame_idx, frame_count, width)
 
                     self._emit_frame(
                         vis,
