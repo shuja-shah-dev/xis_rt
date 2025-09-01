@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 import os
 from app.core.config import AppConfig
 from werkzeug.utils import secure_filename
-
+import uuid
 
 camera_bp = Blueprint("camera", __name__)
 app_config = AppConfig()
@@ -14,7 +14,14 @@ def configure_camera():
         cti_file = request.files["cti_file"]
         if cti_file.filename != "":
             os.makedirs("cti", exist_ok=True)
-            cti_filename = secure_filename(cti_file.filename)
+            for old_file in os.listdir("cti"):
+                if old_file.endswith(".cti"):
+                    try:
+                        os.remove(os.path.join("cti", old_file))
+                    except Exception as e:
+                        print(f"Could not remove {old_file}: {e}")
+            # cti_filename = secure_filename(cti_file.filename)
+            cti_filename = f"{uuid.uuid4().hex}_{secure_filename(cti_file.filename)}"
             cti_file_location = os.path.join("cti", cti_filename)
             cti_file.save(cti_file_location)
             app_config.set_camera_config(cti_file_location)
