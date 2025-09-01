@@ -73,7 +73,7 @@ const Model = ({ setActiveScreen, selectedVideo, setModelStatus }) => {
 
   return (
     <div>
-      <p className="text-3xl font-semibold">Model Configuration</p>
+      <p className="text-3xl font-semibold">Select AI Model/Recipe</p>
       <p className="text-sm text-[#73768D]">
         Select desired model from the following categories.
       </p>

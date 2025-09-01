@@ -136,7 +136,7 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
       setDisconnecting(false);
       setStreaming(false);
       setActiveScreen("Camera");
-    }, 2000);
+    }, 3000);
   };
 
   return (
