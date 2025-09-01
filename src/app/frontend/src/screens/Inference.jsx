@@ -114,6 +114,8 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
       if (res.ok) {
         console.log("Stream started successfully:", data);
         setStreaming(true);
+       
+        setCameraStatus("Connected");
       } else {
         console.error("Failed to start stream:", data);
         alert(`Failed to start stream: ${data.message || 'Unknown error'}`);
@@ -129,7 +131,7 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
     await disconnectStream();
 
     setConnectionStatus("Disconnected");
-setCameraStatus("Disconnected");
+    setCameraStatus("Disconnected");
     setTimeout(() => {
       setDisconnecting(false);
       setStreaming(false);
@@ -185,8 +187,8 @@ setCameraStatus("Disconnected");
               (selectedCamera === "Video As Webcam" && !videoEnded)
             }
             className={`px-5 py-2 rounded-xl text-white text-md transition-colors ${disconnecting || (selectedCamera === "Video As Webcam" && !videoEnded)
-                ? "bg-gray-500 cursor-not-allowed"
-                : "bg-[#dc2626] hover:bg-red-700 cursor-pointer"
+              ? "bg-gray-500 cursor-not-allowed"
+              : "bg-[#dc2626] hover:bg-red-700 cursor-pointer"
               }`}
             title={
               disconnecting

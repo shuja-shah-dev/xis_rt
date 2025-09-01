@@ -27,16 +27,16 @@ function App() {
   //   }
   // }, []);
 
-  useEffect(() => {
+  // useEffect(() => {
    
-    if (selectedCustomCam || selectedVideo) {
+  //   if (selectedCustomCam ) {
       
-      setCameraStatus("Connected");
+  //     setCameraStatus("Connected");
 
-    } else {
-      setCameraStatus("Disconnected");
-    }
-  }, [selectedCustomCam, selectedVideo]);
+  //   } else {
+  //     setCameraStatus("Disconnected");
+  //   }
+  // }, [selectedCustomCam]);
   useEffect(() => {
     const checkMqtt = async () => {
       try {

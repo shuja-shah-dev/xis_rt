@@ -91,7 +91,7 @@ const CameraSelector = ({ onNext , setSelectedCustomCam}) => {
    
         {baseCameras.map((camera) => {
           const isSelected = selected === camera.id;
-          const status = isSelected ? "Connected" : "Not Connected";
+          const status = isSelected ? "Initialized" : "Not Initialized";
 
           return (
             <div
@@ -119,7 +119,7 @@ const CameraSelector = ({ onNext , setSelectedCustomCam}) => {
                   )}
                   <div
                     className={`text-[10px] font-semibold rounded-4xl py-1 px-5 ${
-                      status === "Connected" ? "bg-[#1AA64B]" : "bg-[#FF4C40]"
+                      status === "Initialized" ? "bg-[#1AA64B]" : "bg-[#FF4C40]"
                     }`}
                   >
                     {status}
@@ -140,10 +140,10 @@ const CameraSelector = ({ onNext , setSelectedCustomCam}) => {
           );
         })}
 
-        {/* Custom Cameras (insert before + button) */}
+       
         {customCameras.map((camera) => {
           const isSelected = selected === camera.id;
-          const status = isSelected ? "Connected" : "Not Connected";
+          const status = isSelected ? "Initialized" : "Not Initialized";
 
           return (
             <div
@@ -178,7 +178,7 @@ const CameraSelector = ({ onNext , setSelectedCustomCam}) => {
                   )}
                   <div
                     className={`text-[10px] font-semibold rounded-4xl py-1 px-5 ${
-                      status === "Connected" ? "bg-[#1AA64B]" : "bg-[#FF4C40]"
+                      status === "Initialized" ? "bg-[#1AA64B]" : "bg-[#FF4C40]"
                     }`}
                   >
                     {status}
