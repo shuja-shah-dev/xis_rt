@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import { io } from "socket.io-client";
 
-const Inference = ({ setActiveScreen, disconnectStream, socketRef }) => {
+const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketRef }) => {
   const [streaming, setStreaming] = useState(false);
   const [socket, setSocket] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
@@ -129,7 +129,7 @@ const Inference = ({ setActiveScreen, disconnectStream, socketRef }) => {
     await disconnectStream();
 
     setConnectionStatus("Disconnected");
-
+setCameraStatus("Disconnected");
     setTimeout(() => {
       setDisconnecting(false);
       setStreaming(false);

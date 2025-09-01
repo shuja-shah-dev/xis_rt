@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from "react";
 import RoundedButton from "../RoundedButton";
 import { FaTrash } from "react-icons/fa";
 
-const CameraSelector = ({ onNext }) => {
+const CameraSelector = ({ onNext , setSelectedCustomCam}) => {
   const [selected, setSelected] = useState(null);
   const [selectedCameraName, setSelectedCameraName] = useState(""); // New state for camera name
   const [customCameras, setCustomCameras] = useState([]);
@@ -18,12 +18,12 @@ const CameraSelector = ({ onNext }) => {
       setCustomCameras(JSON.parse(savedCameras));
     }
     // Load selected camera
-    const savedSelected = localStorage.getItem("selectedCamera");
-    if (savedSelected) {
-      const { id, name } = JSON.parse(savedSelected);
-      setSelected(id);
-      setSelectedCameraName(name);
-    }
+    // const savedSelected = localStorage.getItem("selectedCamera");
+    // if (savedSelected) {
+    //   const { id, name } = JSON.parse(savedSelected);
+    //   setSelected(id);
+    //   setSelectedCameraName(name);
+    // }
   }, []);
 
 
@@ -47,6 +47,7 @@ const CameraSelector = ({ onNext }) => {
     setSelected(id);
     setSelectedCameraName(name);
     localStorage.setItem("selectedCamera", JSON.stringify({ id, name }));
+    setSelectedCustomCam(id);
   };
 
   const handleDisconnect = () => {

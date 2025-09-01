@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, send_from_directory, render_template_string
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room
 from config.settings import settings
@@ -15,8 +15,8 @@ import threading
 from app.core.video_service.raw_dough import VideoInferenceService
 from app.core.video_service.baked_baguette import VideoInferenceService_baked
 from app.core.video_service.donut import VideoInferenceService_dont
-
-
+import mimetypes
+mimetypes.add_type("application/javascript", ".js")
 app_config = AppConfig()
 __PREFIX__ = "/api"
 socketio = SocketIO()
@@ -47,11 +47,25 @@ def get_socketio():
     global _socketio_instance
     return _socketio_instance
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
 
 def create_app():
     global _genicam_service, _socketio_instance
 
-    app = Flask(__name__)
+    # app = Flask(
+    #     __name__,
+    #     static_folder="frontend/dist",
+    #     static_url_path="",
+    #     template_folder="frontend/dist",
+    # )
+
+    app = Flask(
+    __name__,
+    static_folder=DIST_DIR,
+    static_url_path="",
+    template_folder=DIST_DIR,
+)
 
     CORS(
         app,
@@ -103,6 +117,26 @@ def create_app():
 
     _socketio_instance = socketio
     print("SocketIO initialized and stored globally")
+
+    @app.route("/")
+    def serve_react_app():
+        try:
+            return send_from_directory(DIST_DIR, "index.html")
+        except Exception:
+            return render_template_string("<h1>⚠️ React build not found</h1>"), 404
+
+    @app.route("/<path:path>")
+    def serve_react_assets(path):
+        full_path = os.path.join(DIST_DIR, path)
+        if os.path.exists(full_path):
+            return send_from_directory(DIST_DIR, path)
+        return serve_react_app()
+
+    # Error handlers for React routing
+    @app.errorhandler(404)
+    def not_found(error):
+        # Serve React app for client-side routing
+        return serve_react_app()
 
     # ============ SOCKETIO EVENT HANDLERS MUST BE DEFINED AFTER INIT ============
     @socketio.on("connect", namespace="/ws")

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import RoundedButton from "../components/RoundedButton";
 
-const Model = ({ setActiveScreen, selectedVideo }) => {
+const Model = ({ setActiveScreen, selectedVideo, setModelStatus }) => {
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -62,6 +62,7 @@ const Model = ({ setActiveScreen, selectedVideo }) => {
         throw new Error(data.message || "Model selection failed");
       }
       setSelected(modelId);
+      setModelStatus("Loaded");
     } catch (e) {
       setSelected(null);
       setError(e.message);
