@@ -6,6 +6,7 @@ import Camera from "./screens/Camera";
 import Model from "./screens/Model";
 import Inference from "./screens/Inference";
 import { BlobLarge } from "./components/Blob";
+import ImageMeasurementTool from "./components/Measurement";
 
 function App() {
   const [activeScreen, setActiveScreen] = useState("Camera");
@@ -16,27 +17,11 @@ function App() {
   const [modelStatus, setModelStatus] = useState("Not Loaded");
   const [mqttStatus, setMqttStatus] = useState("Disconnected");
   const [cameraStatus, setCameraStatus] = useState("Disconnected");
+  const [showMeasurement, setShowMeasurement] = useState(false);
+
   
    const [selectedCustomCam, setSelectedCustomCam] = useState(null);
 
-  // useEffect(() => {
-  //   const stored = localStorage.getItem("selectedCamera");
-   
-  //   if (stored) {
-  //     setSavedSelected(JSON.parse(stored));
-  //   }
-  // }, []);
-
-  // useEffect(() => {
-   
-  //   if (selectedCustomCam ) {
-      
-  //     setCameraStatus("Connected");
-
-  //   } else {
-  //     setCameraStatus("Disconnected");
-  //   }
-  // }, [selectedCustomCam]);
   useEffect(() => {
     const checkMqtt = async () => {
       try {
@@ -103,12 +88,22 @@ function App() {
       case "Camera":
         return <Camera setActiveScreen={setActiveScreen} setSelectedVideo={setSelectedVideo} setSelectedCustomCam={setSelectedCustomCam}/>;
       case "Model":
-        return <Model setActiveScreen={setActiveScreen} selectedVideo={selectedVideo} setModelStatus={setModelStatus} />;
+        return <Model setActiveScreen={setActiveScreen} selectedVideo={selectedVideo} setModelStatus={setModelStatus}  setShowMeasurement={setShowMeasurement}/>;
       case "Inference":
-        return <Inference setActiveScreen={setActiveScreen}
-          disconnectStream={disconnectStream}
-          setCameraStatus={setCameraStatus}
-          socketRef={socketRef} />;
+        if (selectedVideo && showMeasurement) {
+        return <ImageMeasurementTool 
+                  setActiveScreen={setActiveScreen} 
+                  selectedVideo={selectedVideo} 
+                  setShowMeasurement={setShowMeasurement}
+                />;
+      } else {
+        return <Inference 
+                  setActiveScreen={setActiveScreen}
+                  disconnectStream={disconnectStream}
+                  setCameraStatus={setCameraStatus}
+                  socketRef={socketRef} 
+               />;
+      }
       default:
         return null;
     }

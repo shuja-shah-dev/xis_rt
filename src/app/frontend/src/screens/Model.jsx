@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import RoundedButton from "../components/RoundedButton";
 
-const Model = ({ setActiveScreen, selectedVideo, setModelStatus }) => {
+const Model = ({ setActiveScreen, selectedVideo, setModelStatus , setShowMeasurement}) => {
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -143,7 +143,7 @@ const Model = ({ setActiveScreen, selectedVideo, setModelStatus }) => {
       <div className="mt-6 flex justify-end">
         <button
           disabled={!selected}
-          onClick={() => setActiveScreen("Inference")}
+          onClick={() => {setShowMeasurement(true); setActiveScreen("Inference")}}
           className="px-5 py-2 rounded-xl bg-[#1272E5] text-white text-md cursor-pointer disabled:opacity-50"
         >
           Next
