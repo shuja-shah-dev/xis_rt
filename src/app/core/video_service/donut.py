@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import time
 import cv2
@@ -5,6 +7,7 @@ import numpy as np
 import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
+from pycuda.compiler import SourceModule
 from collections import deque, defaultdict
 import json
 import os
@@ -12,11 +15,78 @@ import threading
 import queue
 import base64
 import csv
+from concurrent.futures import ThreadPoolExecutor
+import warnings
+
+warnings.filterwarnings('ignore')
 
 PINNED_THRESHOLD_BYTES = 16 * 1024 * 1024
 DEFAULT_TOPK = 100
 DEFAULT_CANVAS = 640
 
+CLASSES = ('bad','baguette','good','hole')
+LABEL_BAD, LABEL_BAGUETTE, LABEL_GOOD, LABEL_HOLE = 0, 1, 2, 3
+
+COLOR_RED   = (0,   0, 255)
+COLOR_GREEN = (0, 255,   0)
+COLOR_BLUE  = (255, 0,   0)
+COLOR_BLACK = (0,   0,   0)
+COLOR_WHITE = (255, 255, 255)
+
+CLASS_TO_COLOR = {
+    LABEL_BAD:  COLOR_RED,
+    LABEL_GOOD: COLOR_GREEN,
+    LABEL_HOLE: COLOR_BLUE,
+}
+DRAW_PRIORITY = {LABEL_GOOD: 0, LABEL_BAD: 1, LABEL_HOLE: 2}
+
+def parse_button(s: str):
+    if s is None: return set()
+    s = s.strip()
+    if s == "" or s == "[]": return set()
+    if s[0] == "[" and s[-1] == "]":
+        s = s[1:-1]
+    tokens = []
+    for t in s.split(","):
+        tt = t.strip().lower().strip("'\"")
+        if tt:
+            tokens.append(tt)
+    valid = {"outer_diameter", "inner_diameter"}
+    return set(t for t in tokens if t in valid)
+
+def load_config(path: str):
+    with open(path, "r") as f:
+        cfg = json.load(f)
+    roi = cfg.get("ROI", {})
+    ref = cfg.get("reference", {})
+
+    def fget(d, k, default=None):
+        v = d.get(k, default)
+        try:
+            return float(v)
+        except Exception:
+            return default
+
+    cx = fget(roi, "x")
+    cy = fget(roi, "y")
+    rw = fget(roi, "width")
+    rh = fget(roi, "height")
+    if None in (cx, cy, rw, rh):
+        raise ValueError("ROI values (x,y,width,height) must be provided in the JSON.")
+
+    px_len = fget(ref, "pixel_length")
+    ac_len = fget(ref, "actual_length")
+    unit = ref.get("unit", "mm")
+    mm_per_px = None
+    if px_len and ac_len and px_len > 0:
+        mm_per_px = ac_len / px_len
+    return cx, cy, rw, rh, mm_per_px, unit
+
+def fmt_len(px_val: int, scale_units_per_px, unit_label: str):
+    if scale_units_per_px is None:
+        return f"{int(px_val)}"
+    else:
+        return f"{int(px_val)}px ({px_val*scale_units_per_px:.3f} {unit_label})"
 
 def letterbox(img, size=640, pad_val=114):
     h, w = img.shape[:2]
@@ -28,211 +98,502 @@ def letterbox(img, size=640, pad_val=114):
     canvas[top:top + new_h, left:left + new_w] = resized
     return canvas, scale, left, top
 
-
 def unletterbox_boxes(boxes_xyxy, scale, left, top, out_w, out_h):
     if boxes_xyxy.size == 0:
         return boxes_xyxy
-    out = boxes_xyxy.astype(np.float32).copy()
+    out = boxes_xyxy.astype(np.float32, copy=False)
     out[:, [0, 2]] = np.clip((out[:, [0, 2]] - left) / scale, 0, out_w - 1)
-    out[:, [1, 3]] = np.clip((out[:, [1, 3]] - top) / scale, 0, out_h - 1)
+    out[:, [1, 3]] = np.clip((out[:, [1, 3]] - top)  / scale, 0, out_h - 1)
     return out
 
+def unletterbox_masks_roi(masks_u8, boxes_img, scale, left, top, out_w, out_h, max_workers=4):
+    if masks_u8.size == 0:
+        return masks_u8, 0.0, 0.0
+    N, Hm, Wm = masks_u8.shape
+    out_masks = np.zeros((N, out_h, out_w), dtype=np.uint8)
 
-def unletterbox_masks_with_timing(masks, scale, left, top, out_w, out_h):
-    if masks.size == 0:
-        return masks, 0.0, 0.0
-    t0 = time.perf_counter()
-    new_w, new_h = int(round(out_w * scale)), int(round(out_h * scale))
-    cropped = masks[:, top:top + new_h, left:left + new_w]
-    t1 = time.perf_counter()
-    out_masks = np.zeros((cropped.shape[0], out_h, out_w), dtype=masks.dtype)
-    t_r0 = time.perf_counter()
-    for i in range(cropped.shape[0]):
-        out_masks[i] = cv2.resize(cropped[i], (out_w, out_h), interpolation=cv2.INTER_NEAREST)
-    t_r1 = time.perf_counter()
-    return out_masks, (t1 - t0), (t_r1 - t_r0)
+    x1 = np.clip(left + boxes_img[:, 0] * scale, 0, Wm).astype(np.int32)
+    y1 = np.clip(top  + boxes_img[:, 1] * scale, 0, Hm).astype(np.int32)
+    x2 = np.clip(left + boxes_img[:, 2] * scale, 0, Wm).astype(np.int32)
+    y2 = np.clip(top  + boxes_img[:, 3] * scale, 0, Hm).astype(np.int32)
 
+    dx1 = np.clip(boxes_img[:, 0], 0, out_w).astype(np.int32)
+    dy1 = np.clip(boxes_img[:, 1], 0, out_h).astype(np.int32)
+    dx2 = np.clip(boxes_img[:, 2], 0, out_w).astype(np.int32)
+    dy2 = np.clip(boxes_img[:, 3], 0, out_h).astype(np.int32)
 
-def draw_inference_region(frame, region):
-    """Draw the inference region rectangle"""
-    x, y, w, h = region
-    cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 255, 0), 2)
+    def place(i):
+        if x2[i] <= x1[i] or y2[i] <= y1[i] or dx2[i] <= dx1[i] or dy2[i] <= dy1[i]:
+            return
+        src = masks_u8[i, y1[i]:y2[i], x1[i]:x2[i]]
+        if src.size == 0: return
+        w_dst = int(dx2[i] - dx1[i]); h_dst = int(dy2[i] - dy1[i])
+        dst_roi = cv2.resize(src, (w_dst, h_dst), interpolation=cv2.INTER_NEAREST)
+        out_masks[i, dy1[i]:dy1[i]+h_dst, dx1[i]:dx1[i]+w_dst] = dst_roi
 
+    if N > 3:
+        with ThreadPoolExecutor(max_workers=min(max_workers, N)) as ex:
+            list(ex.map(place, range(N)))
+    else:
+        for i in range(N): place(i)
+    return out_masks, 0.0, 0.0
 
-def filter_by_class_thresholds(boxes, labels, scores, masks, class_thresholds):
-    """Filter detections using per-class confidence thresholds"""
-    if len(boxes) == 0:
-        return boxes, labels, scores, masks, np.array([])
-    
-    keep_mask = np.zeros(len(scores), dtype=bool)
-    
-    for class_id, threshold in class_thresholds.items():
-        class_mask = (labels == class_id) & (scores >= threshold)
-        keep_mask |= class_mask
-    
-    if not np.any(keep_mask):
-        return np.array([]), np.array([]), np.array([]), np.array([]), np.array([])
-    
-    keep_indices = np.flatnonzero(keep_mask)
-    return (boxes[keep_mask], labels[keep_mask], scores[keep_mask], 
-            masks[keep_mask] if masks.size > 0 else masks, keep_indices)
+def blend_masks_classwise(base_bgr, masks, labels, alpha=0.45):
+    vis = base_bgr.copy()
+    if masks.size == 0: return vis
+    draw = []
+    for i, lab in enumerate(labels):
+        if int(lab) == LABEL_BAGUETTE: continue
+        draw.append((DRAW_PRIORITY.get(int(lab), 1), i))
+    if not draw: return vis
+    draw.sort(key=lambda x: x[0])
+    for _, i in draw:
+        lab = int(labels[i]); m = masks[i]
+        if m.sum() == 0: continue
+        x, y, w, h = cv2.boundingRect(m)
+        if w == 0 or h == 0: continue
+        roi = vis[y:y+h, x:x+w]; mroi = m[y:y+h, x:x+w]
+        color = CLASS_TO_COLOR.get(lab)
+        if color is None: continue
+        color_roi = np.full_like(roi, color, dtype=np.uint8)
+        blended = cv2.addWeighted(roi, 1.0 - alpha, color_roi, alpha, 0.0)
+        cv2.copyTo(blended, mroi, roi)
+    return vis
 
+def compute_roi_rect(frame_w, frame_h, cx, cy, w, h):
+    w = int(round(w)); h = int(round(h))
+    x1 = int(round(cx - w / 2.0)); y1 = int(round(cy - h / 2.0))
+    x1 = max(0, min(x1, frame_w - 1)); y1 = max(0, min(y1, frame_h - 1))
+    x2 = max(x1 + 1, min(x1 + w, frame_w)); y2 = max(y1 + 1, min(y1 + h, frame_h))
+    return x1, y1, x2, y2
 
-def is_point_in_region(point, region):
-    """Check if a point is inside the inference region"""
-    px, py = point
-    rx, ry, rw, rh = region
-    return rx <= px <= rx + rw and ry <= py <= ry + rh
+def collect_good_items(labels_kept, masks_roi):
+    goods = []
+    for i, lab in enumerate(labels_kept):
+        if int(lab) != LABEL_GOOD: continue
+        m = masks_roi[i]
+        if m is None or m.size == 0 or m.sum() == 0: continue
+        x, y, w, h = cv2.boundingRect(m)
+        if w == 0 or h == 0: continue
+        cx = x + w // 2
+        cy = y + h // 2
+        goods.append({"i": i, "x": x, "y": y, "w": w, "h": h, "cx": cx, "cy": cy, "area": int(w*h)})
+    return goods
 
+def collect_hole_items(labels_kept, masks_roi):
+    holes = []
+    for i, lab in enumerate(labels_kept):
+        if int(lab) != LABEL_HOLE: continue
+        m = masks_roi[i]
+        if m is None or m.size == 0 or m.sum() == 0: continue
+        x, y, w, h = cv2.boundingRect(m)
+        if w == 0 or h == 0: continue
+        cx = x + w // 2
+        cy = y + h // 2
+        holes.append({"i": i, "x": x, "y": y, "w": w, "h": h, "cx": cx, "cy": cy, "area": int(w*h)})
+    return holes
 
-def filter_detections_in_region(boxes, labels, scores, masks, region):
-    """Filter detections to only those in the inference region"""
-    if len(boxes) == 0:
-        return boxes, labels, scores, masks
-    
-    centers = (boxes[:, :2] + boxes[:, 2:4]) / 2
-    in_region = []
-    
-    for i, center in enumerate(centers):
-        if is_point_in_region(center, region):
-            in_region.append(i)
-    
-    if not in_region:
-        return np.array([]), np.array([]), np.array([]), np.array([])
-    
-    in_region = np.array(in_region)
-    return boxes[in_region], labels[in_region], scores[in_region], masks[in_region]
-
-
-def match_holes_to_doughnuts(doughnut_boxes, doughnut_labels, hole_boxes):
-    """Match each doughnut (class 0,1) to all holes (class 2) inside it"""
-    matches = []
-    
-    for i, (d_box, d_label) in enumerate(zip(doughnut_boxes, doughnut_labels)):
-        if d_label not in [0, 1]:
-            continue
-        
-        for j, h_box in enumerate(hole_boxes):
-            h_center = (h_box[:2] + h_box[2:4]) / 2
-            
-            if (d_box[0] <= h_center[0] <= d_box[2] and 
-                d_box[1] <= h_center[1] <= d_box[3]):
-                matches.append((i, j))
-    
-    return matches
-
-
-def calculate_measurements(doughnut_box, hole_box):
-    """Calculate distances from hole center to doughnut top and bottom"""
-    hole_center_y = (hole_box[1] + hole_box[3]) / 2
-    top_distance = hole_center_y - doughnut_box[1]
-    bottom_distance = doughnut_box[3] - hole_center_y
-    
-    return top_distance, bottom_distance
-
-
-def draw_measurement_lines(frame, doughnut_box, hole_box, color=(255, 255, 255)):
-    """Draw white lines from doughnut edges to hole edges"""
-    d_x1, d_y1, d_x2, d_y2 = [int(x) for x in doughnut_box]
-    h_x1, h_y1, h_x2, h_y2 = [int(x) for x in hole_box]
-    
-    hole_center_x = int((h_x1 + h_x2) / 2)
-    
-    cv2.line(frame, (hole_center_x, d_y1), (hole_center_x, h_y1), color, 2)
-    cv2.line(frame, (hole_center_x, h_y2), (hole_center_x, d_y2), color, 2)
-
-
-def draw_doughnut_numbers(frame, boxes, labels, region):
-    """Number doughnuts from left to right in the region"""
-    if len(boxes) == 0:
-        return []
-    
-    doughnut_indices = []
-    for i, (box, label) in enumerate(zip(boxes, labels)):
-        if label in [0, 1]:
-            center = (box[:2] + box[2:4]) / 2
-            if is_point_in_region(center, region):
-                doughnut_indices.append((i, box[0]))
-    
-    doughnut_indices.sort(key=lambda x: x[1])
-    
-    numbered_doughnuts = []
-    for num, (idx, _) in enumerate(doughnut_indices, 1):
-        box = boxes[idx]
-        label = labels[idx]
-        
-        x1, y1, x2, y2 = [int(v) for v in box]
-        
-        text_x = max(0, x1 - 5)
-        text_y = max(20, y1 - 5)
-        
-        text_size = cv2.getTextSize(str(num), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-        cv2.rectangle(frame, 
-                     (text_x - 2, text_y - text_size[1] - 4),
-                     (text_x + text_size[0] + 2, text_y + 4),
-                     (0, 0, 0), -1)
-        
-        cv2.putText(frame, str(num), (text_x, text_y), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        numbered_doughnuts.append((num, idx, label))
-    
-    return numbered_doughnuts
-
-
-def colorize_doughnut_masks(frame, masks, boxes, labels, alpha=0.7):
-    """Draw only red (bad) and green (good) masks for doughnuts"""
-    if masks.size == 0:
-        return frame
-    
-    overlay = frame.copy()
-    
-    for i, (mask, box, label) in enumerate(zip(masks, boxes, labels)):
-        if label == 0:
-            color = (0, 0, 255)
-        elif label == 1:
-            color = (0, 255, 0)
+def pair_holes_to_goods(goods_sorted, holes):
+    hole_heights = []
+    for g in goods_sorted:
+        gx1, gy1 = g["x"], g["y"]
+        gx2, gy2 = g["x"] + g["w"], g["y"] + g["h"]
+        candidates = [h for h in holes if (gx1 <= h["cx"] <= gx2 and gy1 <= h["cy"] <= gy2)]
+        if candidates:
+            best = max(candidates, key=lambda hh: hh["area"])
+            hole_heights.append(best["h"])
         else:
-            continue
-        
-        mask_bool = mask > 127
-        overlay[mask_bool] = color
-    
-    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
-    return frame
+            hole_heights.append(0)
+    return hole_heights
 
+def compute_good_union_mask(labels_kept, masks_roi, H, W):
+    if masks_roi.size == 0: return np.zeros((H, W), dtype=np.uint8)
+    union = np.zeros((H, W), dtype=np.uint8)
+    for i, lab in enumerate(labels_kept):
+        if int(lab) == LABEL_GOOD:
+            union |= (masks_roi[i] > 0).astype(np.uint8)
+    return union
 
-class TimeBasedRowTracker:
-    def __init__(self, start_time=4.5, interval=1.0):
-        """Track rows based on video timestamps"""
-        self.start_time = start_time
-        self.interval = interval
-        self.processed_rows = set()
-        self.current_row_number = 0
-        self.last_processed_time = 0
-    
-    def should_process_row(self, current_time_seconds):
-        """Check if current timestamp should trigger a new row processing"""
-        if current_time_seconds < self.start_time:
-            return False, None
+def make_locked_slots_from_goods(goods, roi_h, min_band=8, band_scale=0.4):
+    goods = sorted(goods, key=lambda g: g["cy"])
+    slots = []
+    for k, g in enumerate(goods, start=1):
+        h = max(1, int(g["h"]))
+        half_band = max(min_band, int(band_scale * h))
+        lo = max(0, g["cy"] - half_band)
+        hi = min(roi_h, g["cy"] + half_band)
+        slots.append({
+            "idx": k,
+            "last_x": float(g["cx"]),
+            "last_y": float(g["cy"]),
+            "band_lo": int(lo),
+            "band_hi": int(hi),
+        })
+    return slots
+
+def track_locked_slots(current_goods, locked_slots, tol_y=40, x_forward_slack=6, smooth=0.6):
+    if not locked_slots: return []
+    used = set(); out = []
+    for slot in sorted(locked_slots, key=lambda s: s["idx"]):
+        best_j, best_dy = None, float("inf")
+        for j, g in enumerate(current_goods):
+            if j in used: continue
+            dy = abs(g["cy"] - slot["last_y"])
+            if dy <= tol_y and g["cx"] <= slot["last_x"] + x_forward_slack:
+                if dy < best_dy:
+                    best_dy, best_j = dy, j
+        if best_j is not None:
+            used.add(best_j)
+            g = current_goods[best_j]
+            out.append({"x": g["x"], "y": g["y"], "idx": slot["idx"]})
+            slot["last_y"] = smooth * slot["last_y"] + (1.0 - smooth) * g["cy"]
+            slot["last_x"] = min(slot["last_x"], float(g["cx"]))
+    return out
+
+def all_slots_fully_out_left_restricted(good_union_mask, locked_slots, left_exit_slack=2):
+    if not locked_slots: return True
+    H, W = good_union_mask.shape
+    for s in locked_slots:
+        lo = max(0, min(H, s["band_lo"]))
+        hi = max(0, min(H, s["band_hi"]))
+        if lo >= hi: return False
+        limit = int(min(W, max(1, s["last_x"] + left_exit_slack)))
+        band_left = good_union_mask[lo:hi, :limit]
+        if np.any(band_left):
+            return False
+    return True
+
+class OptimizedTRTSegmentor:
+    def __init__(self, engine_path, verbose=False):
+        print(f"Initializing TRTSegmentor with engine: {engine_path}")
         
-        time_since_start = current_time_seconds - self.start_time
-        current_row_interval = int(time_since_start / self.interval)
-        expected_trigger_time = self.start_time + (current_row_interval * self.interval)
+        cuda.init()
+        self.device = cuda.Device(0)
+        self.ctx = self.device.make_context()
+        self.ctx.push()
         
-        if (current_time_seconds >= expected_trigger_time and 
-            current_row_interval not in self.processed_rows and
-            current_time_seconds > self.last_processed_time + 0.5):
+        try:
+            self.trt10 = int(trt.__version__.split('.')[0]) >= 10
+            logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.ERROR)
             
-            self.processed_rows.add(current_row_interval)
-            self.current_row_number += 1
-            self.last_processed_time = current_time_seconds
-            
-            print(f"Triggering row detection at {current_time_seconds:.2f}s (expected: {expected_trigger_time:.1f}s)")
-            return True, self.current_row_number
-        
-        return False, None
+            t0 = time.perf_counter()
+            with open(engine_path, "rb") as f:
+                runtime = trt.Runtime(logger)
+                self.engine = runtime.deserialize_cuda_engine(f.read())
+            self.context = self.engine.create_execution_context()
+            t1 = time.perf_counter()
+            self.model_load_s = (t1 - t0)
 
+            self._setup_io()
+            self.stream = cuda.Stream()
+            self.start_evt = cuda.Event(); self.end_evt = cuda.Event()
+
+            self._thresh_mod = SourceModule(r"""
+            extern "C" __global__
+            void thresh_u8(const float* __restrict__ src,
+                           unsigned char* __restrict__ dst,
+                           int n, int src_offset, int dst_offset, float thr) {
+                int i = blockDim.x * blockIdx.x + threadIdx.x;
+                if (i < n) {
+                    float v = src[src_offset + i];
+                    dst[dst_offset + i] = (unsigned char)((v > thr) ? 255 : 0);
+                }
+            }""")
+            self._k_thresh = self._thresh_mod.get_function("thresh_u8")
+            self.dev_masks_u8 = None; self.u8_capacity = 0; self.mask_host_buf_u8 = None
+
+            self._roi_mod = SourceModule(r"""
+            extern "C" __global__
+            void resize_thresh_roi(
+                const float* __restrict__ src,
+                int Hm, int Wm,
+                int src_offset_elems,
+                int sx, int sy, int sw, int sh,
+                unsigned char* __restrict__ dst,
+                int dst_offset_elems,
+                int dw, int dh,
+                float thr
+            ){
+                int x = blockDim.x * blockIdx.x + threadIdx.x;
+                int y = blockDim.y * blockIdx.y + threadIdx.y;
+                if (x >= dw || y >= dh) return;
+                float fx = ((x + 0.5f) * (float)sw / (float)dw) - 0.5f;
+                float fy = ((y + 0.5f) * (float)sh / (float)dh) - 0.5f;
+                int ix = sx + (int)roundf(fx);
+                int iy = sy + (int)roundf(fy);
+                ix = max(0, min(Wm - 1, ix));
+                iy = max(0, min(Hm - 1, iy));
+                float v = src[src_offset_elems + iy * Wm + ix];
+                dst[dst_offset_elems + y * dw + x] = (unsigned char)(v > thr ? 255 : 0);
+            }""")
+            self._k_roi = self._roi_mod.get_function("resize_thresh_roi")
+
+            self.dev_rois_u8 = None; self.host_rois_u8 = None; self.roi_bytes_capacity = 0
+            _ = cv2.resize(np.zeros((10,10), np.uint8), (20,20), interpolation=cv2.INTER_NEAREST)
+            
+            print("TRTSegmentor initialization complete")
+            
+        finally:
+            pass
+
+    def _setup_io(self):
+        if self.trt10:
+            names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
+        else:
+            names = [self.engine.get_binding_name(i) for i in range(self.engine.num_bindings)]
+        def find_tensor(keys):
+            for name in names:
+                if any(k in name.lower() for k in keys): return name
+            return None
+        self.name_in     = find_tensor(['raw_input','input'])
+        self.name_dets   = find_tensor(['det','boxes'])
+        self.name_labels = find_tensor(['label','class'])
+        self.name_masks  = find_tensor(['mask','seg'])
+        if any(x is None for x in [self.name_in, self.name_dets, self.name_labels, self.name_masks]):
+            raise RuntimeError(f"Could not locate required tensors: {names}")
+
+        if self.trt10:
+            self.dtype_in     = trt.nptype(self.engine.get_tensor_dtype(self.name_in))
+            self.dtype_dets   = trt.nptype(self.engine.get_tensor_dtype(self.name_dets))
+            self.dtype_labels = trt.nptype(self.engine.get_tensor_dtype(self.name_labels))
+            self.dtype_masks  = trt.nptype(self.engine.get_tensor_dtype(self.name_masks))
+        else:
+            def gd(name):
+                idx = self.engine.get_binding_index(name)
+                return trt.nptype(self.engine.get_binding_dtype(idx))
+            self.dtype_in, self.dtype_dets = gd(self.name_in), gd(self.name_dets)
+            self.dtype_labels, self.dtype_masks = gd(self.name_labels), gd(self.name_masks)
+
+        self.input_shape = (1, 640, 640, 3)
+        self.max_det = 100
+        self.mask_hw = (640, 640)
+        self.dev_ptr, self.host_buf = {}, {}
+
+        def alloc(name, shape, dtype):
+            n = int(np.prod(shape)); nbytes = n * np.dtype(dtype).itemsize
+            buf = cuda.pagelocked_empty(n, dtype) if nbytes >= PINNED_THRESHOLD_BYTES else np.empty(n, dtype=dtype)
+            self.host_buf[name] = buf
+            self.dev_ptr[name] = cuda.mem_alloc(nbytes)
+
+        alloc(self.name_in, self.input_shape, self.dtype_in)
+        alloc(self.name_dets, (1, self.max_det, 5), self.dtype_dets)
+        alloc(self.name_labels, (1, self.max_det), self.dtype_labels)
+        mask_bytes = int(np.prod((1, self.max_det, *self.mask_hw))) * np.dtype(self.dtype_masks).itemsize
+        self.dev_ptr[self.name_masks] = cuda.mem_alloc(mask_bytes)
+
+        if self.trt10:
+            for name, ptr in self.dev_ptr.items():
+                self.context.set_tensor_address(name, int(ptr))
+        else:
+            self.bindings = [None] * self.engine.num_bindings
+            for i in range(self.engine.num_bindings):
+                name = self.engine.get_binding_name(i)
+                self.bindings[i] = int(self.dev_ptr[name])
+
+    def infer_optimized(self, img_uint8):
+        np.copyto(self.host_buf[self.name_in], img_uint8.ravel())
+        cuda.memcpy_htod_async(self.dev_ptr[self.name_in], self.host_buf[self.name_in], self.stream)
+        self.start_evt.record(self.stream)
+        if self.trt10: self.context.execute_async_v3(self.stream.handle)
+        else:          self.context.execute_async_v2(self.bindings, self.stream.handle)
+        self.end_evt.record(self.stream)
+        cuda.memcpy_dtoh_async(self.host_buf[self.name_dets],   self.dev_ptr[self.name_dets],   self.stream)
+        cuda.memcpy_dtoh_async(self.host_buf[self.name_labels], self.dev_ptr[self.name_labels], self.stream)
+        self.stream.synchronize()
+
+        dets_raw   = self.host_buf[self.name_dets].reshape(1, self.max_det, 5)[0]
+        labels_raw = self.host_buf[self.name_labels].reshape(1, self.max_det)[0]
+        boxes  = dets_raw[:, :4].astype(np.float32, copy=False)
+        scores = dets_raw[:, 4].astype(np.float32, copy=False)
+        labels = labels_raw.astype(np.int32, copy=False)
+        return boxes, labels, scores
+
+    def _ensure_u8_capacity(self, needed_masks):
+        Hm, Wm = self.mask_hw
+        if needed_masks <= getattr(self, "u8_capacity", 0): return
+        self.u8_capacity = max(needed_masks * 2, 32)
+        bytes_u8 = self.u8_capacity * Hm * Wm
+        if getattr(self, "dev_masks_u8", None) is not None: self.dev_masks_u8.free()
+        self.dev_masks_u8 = cuda.mem_alloc(bytes_u8)
+        self.mask_host_buf_u8 = cuda.pagelocked_empty((self.u8_capacity, Hm, Wm), dtype=np.uint8)
+
+    def _ensure_roi_bytes(self, needed_bytes):
+        if needed_bytes <= getattr(self, "roi_bytes_capacity", 0): return
+        self.roi_bytes_capacity = max(needed_bytes * 2, 1 << 20)
+        if getattr(self, "dev_rois_u8", None) is not None: self.dev_rois_u8.free()
+        self.dev_rois_u8 = cuda.mem_alloc(self.roi_bytes_capacity)
+        self.host_rois_u8 = cuda.pagelocked_empty(self.roi_bytes_capacity, dtype=np.uint8)
+
+    def copy_masks_optimized(self, indices, thr=0.5):
+        if len(indices) == 0:
+            return np.empty((0, *self.mask_hw), dtype=self.dtype_masks), {}
+        Hm, Wm = self.mask_hw; n_pix = Hm * Wm
+        base_addr = int(self.dev_ptr[self.name_masks]); itemsize = np.dtype(self.dtype_masks).itemsize
+        slice_bytes = Hm * Wm * itemsize
+
+        if self.dtype_masks == np.uint8:
+            if getattr(self, "mask_host_buf", None) is None or getattr(self, "mask_host_capacity", 0) < len(indices):
+                self.mask_host_capacity = max(len(indices) * 2, 32)
+                self.mask_host_buf = cuda.pagelocked_empty((self.mask_host_capacity, Hm, Wm), dtype=np.uint8)
+            for k, idx in enumerate(indices):
+                src = int(base_addr + int(idx) * slice_bytes)
+                dst = self.mask_host_buf[k].ravel()
+                cuda.memcpy_dtoh_async(dst, src, stream=self.stream)
+            self.stream.synchronize()
+            return self.mask_host_buf[:len(indices)].copy(), {}
+
+        self._ensure_u8_capacity(len(indices))
+        threads = 256
+        for k, idx in enumerate(indices):
+            src_offset = int(idx) * n_pix
+            dst_offset = k * n_pix
+            grid = ((n_pix + threads - 1) // threads, 1, 1)
+            self._k_thresh(self.dev_ptr[self.name_masks], self.dev_masks_u8,
+                           np.int32(n_pix), np.int32(src_offset), np.int32(dst_offset), np.float32(thr),
+                           block=(threads,1,1), grid=grid, stream=self.stream)
+        self.stream.synchronize()
+        cuda.memcpy_dtoh_async(self.mask_host_buf_u8[:len(indices)].ravel(), int(self.dev_masks_u8), stream=self.stream)
+        self.stream.synchronize()
+        return self.mask_host_buf_u8[:len(indices)].copy(), {}
+
+    def copy_and_resize_masks_roi_gpu(self, indices, boxes_img, scale, left, top, out_w, out_h, thr=0.5):
+        if len(indices) == 0:
+            return np.empty((0, out_h, out_w), dtype=np.uint8), {}
+        if self.dtype_masks != np.float32:
+            raise RuntimeError("GPU ROI path expects float32 mask output from engine.")
+
+        Hm, Wm = self.mask_hw; n_pix = Hm * Wm
+        boxes_img = boxes_img.astype(np.float32, copy=False)
+        sx = np.clip(left + boxes_img[:,0] * scale, 0, Wm).astype(np.int32)
+        sy = np.clip(top  + boxes_img[:,1] * scale, 0, Hm).astype(np.int32)
+        ex = np.clip(left + boxes_img[:,2] * scale, 0, Wm).astype(np.int32)
+        ey = np.clip(top  + boxes_img[:,3] * scale, 0, Hm).astype(np.int32)
+        sw = np.maximum(ex - sx, 0).astype(np.int32)
+        sh = np.maximum(ey - sy, 0).astype(np.int32)
+        dx = np.clip(boxes_img[:,0], 0, out_w).astype(np.int32)
+        dy = np.clip(boxes_img[:,1], 0, out_h).astype(np.int32)
+        ex2= np.clip(boxes_img[:,2], 0, out_w).astype(np.int32)
+        ey2= np.clip(boxes_img[:,3], 0, out_h).astype(np.int32)
+        dw = np.maximum(ex2 - dx, 0).astype(np.int32)
+        dh = np.maximum(ey2 - dy, 0).astype(np.int32)
+
+        sizes = (dw * dh).astype(np.int64)
+        valid = (sw > 0) & (sh > 0) & (dw > 0) & (dh > 0)
+        sizes[~valid] = 0
+        offsets = np.zeros(len(indices), dtype=np.int64)
+        if len(indices) > 0: np.cumsum(sizes[:-1], out=offsets[1:])
+        total_elems = int(offsets[-1] + sizes[-1]) if len(indices) > 0 else 0
+        self._ensure_roi_bytes(max(total_elems, 1))
+
+        masks_full = np.zeros((len(indices), out_h, out_w), dtype=np.uint8)
+        block = (16,16,1)
+        for i, idx in enumerate(indices):
+            if sizes[i] == 0: continue
+            src_offset = int(idx) * n_pix
+            dst_offset = int(offsets[i])
+            grid = ((int(dw[i])+block[0]-1)//block[0], (int(dh[i])+block[1]-1)//block[1], 1)
+            self._k_roi(self.dev_ptr[self.name_masks],
+                        np.int32(Hm), np.int32(Wm),
+                        np.int32(src_offset),
+                        np.int32(int(sx[i])), np.int32(int(sy[i])),
+                        np.int32(int(sw[i])), np.int32(int(sh[i])),
+                        self.dev_rois_u8,
+                        np.int32(dst_offset),
+                        np.int32(int(dw[i])), np.int32(int(dh[i])),
+                        np.float32(thr),
+                        block=block, grid=grid, stream=self.stream)
+        self.stream.synchronize()
+        if total_elems > 0:
+            cuda.memcpy_dtoh_async(self.host_rois_u8[:total_elems], int(self.dev_rois_u8), stream=self.stream)
+        self.stream.synchronize()
+        base = self.host_rois_u8
+        for i in range(len(indices)):
+            if sizes[i] == 0: continue
+            count = int(sizes[i]); off = int(offsets[i])
+            roi = np.frombuffer(base, dtype=np.uint8, count=count, offset=off).reshape(int(dh[i]), int(dw[i]))
+            masks_full[i, dy[i]:dy[i]+int(dh[i]), dx[i]:dx[i]+int(dw[i])] = roi
+        return masks_full, {}
+
+    def cleanup(self):
+        print("Cleaning up TRTSegmentor CUDA resources...")
+
+        cleanup_start_time = time.time()
+        cleanup_timeout = 5.0
+
+        try:
+            try:
+                if hasattr(self, "stream") and self.stream:
+                    print("Synchronizing CUDA stream...")
+                    self.stream.synchronize()
+                    print("CUDA stream synchronized")
+            except Exception as e:
+                print(f"Warning: Could not synchronize CUDA stream: {e}")
+
+            if time.time() - cleanup_start_time > cleanup_timeout:
+                print("Cleanup timeout reached during stream sync - aborting")
+                return
+
+            print("Freeing device memory...")
+            freed_count = 0
+            for name, ptr in list(self.dev_ptr.items()):
+                try:
+                    if ptr:
+                        ptr.free()
+                        freed_count += 1
+                except Exception as e:
+                    print(f"Warning: Error freeing device memory for {name}: {e}")
+
+                if time.time() - cleanup_start_time > cleanup_timeout:
+                    print(f"Cleanup timeout reached - freed {freed_count}/{len(self.dev_ptr)} buffers")
+                    break
+
+            print(f"Freed {freed_count} device memory buffers")
+
+            self.host_buf.clear()
+            self.dev_ptr.clear()
+
+            if hasattr(self, "dev_masks_u8") and self.dev_masks_u8:
+                self.dev_masks_u8.free()
+            if hasattr(self, "dev_rois_u8") and self.dev_rois_u8:
+                self.dev_rois_u8.free()
+
+            print("CUDA resources cleanup attempted")
+
+        except Exception as e:
+            print(f"Warning: Error during CUDA resource cleanup: {e}")
+
+        finally:
+            print("Detaching CUDA context...")
+            try:
+                if hasattr(self, "ctx") and self.ctx:
+                    self.ctx.pop()
+                    self.ctx.detach()
+                    print("CUDA context detached successfully")
+            except Exception as e:
+                print(f"Warning: TensorRT context cleanup error (IGNORED): {e}")
+                print("This TensorRT cleanup warning can be safely ignored")
+
+            try:
+                time.sleep(0.1)
+            except:
+                pass
+
+            print("TensorRT cleanup completed (with warnings ignored)")
+
+class FPSCounter:
+    def __init__(self, window_size=30):
+        self.times = deque(maxlen=window_size)
+        self.last_time = time.perf_counter()
+
+    def update(self):
+        current_time = time.perf_counter()
+        self.times.append(current_time - self.last_time)
+        self.last_time = current_time
+
+    def get_fps(self):
+        if len(self.times) < 2:
+            return 0.0
+        return len(self.times) / sum(self.times)
 
 class VideoInferenceService_dont:
     def __init__(self, websocket_mode=True):
@@ -258,7 +619,12 @@ class VideoInferenceService_dont:
         self.watchdog_thread = None
         self.emergency_stop_event = threading.Event()
         self.csv_data = []
-        self.row_tracker = None
+        
+        self.state = "seek"
+        self.locked_slots = []
+        self.gap_t0 = None
+        self.roi_config = None
+        self.button_set = set()
 
     def set_socketio(self, socketio):
         self.socketio = socketio
@@ -270,32 +636,50 @@ class VideoInferenceService_dont:
         self.config = {
             "engine_path": config.get("engine_path", ""),
             "video_path": config.get("video_path", ""),
-            "score_threshold": config.get("score_threshold", 0.4),
-            "class0_threshold": config.get("class0_threshold", None),
-            "class1_threshold": config.get("class1_threshold", None),
-            "class2_threshold": config.get("class2_threshold", None),
+            "config_path": config.get("config_path", ""),
+            "button": config.get("button", "[]"),
+            "score_threshold": config.get("score_threshold", 0.5),
             "mask_threshold": config.get("mask_threshold", 0.4),
             "canvas_size": config.get("canvas_size", 640),
-            "alpha": config.get("alpha", 0.7),
+            "alpha": config.get("alpha", 0.45),
             "target_fps": config.get("target_fps", 30.0),
             "mqtt_topic": config.get("mqtt_topic", "detection/results"),
-            "inference_height": config.get("inference_height", 120),
-            "row_start_time": config.get("row_start_time", 4.5),
-            "row_interval": config.get("row_interval", 1.0),
             "csv_output_dir": config.get("csv_output_dir", None),
+            "gap_delay": config.get("gap_delay", 1.0),
+            "min_index_count": config.get("min_index_count", 1),
+            "match_tol_y": config.get("match_tol_y", 50.0),
+            "x_forward_slack": config.get("x_forward_slack", 6.0),
+            "left_exit_slack": config.get("left_exit_slack", 2.0),
+            "gpu_roi": config.get("gpu_roi", True),
+            "engine_binary_masks": config.get("engine_binary_masks", True),
+            "workers": config.get("workers", 4),
         }
 
         if not os.path.exists(self.config["engine_path"]):
             print(f"Engine path does not exist: {self.config['engine_path']}")
             return False
 
+        if not os.path.exists(self.config["config_path"]):
+            print(f"Config path does not exist: {self.config['config_path']}")
+            return False
+
+        try:
+            roi_cx, roi_cy, roi_w, roi_h, units_per_px, units_label = load_config(self.config["config_path"])
+            self.roi_config = {
+                "cx": roi_cx, "cy": roi_cy, "w": roi_w, "h": roi_h,
+                "units_per_px": units_per_px, "units_label": units_label
+            }
+            self.button_set = parse_button(self.config["button"])
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            return False
+
         return True
 
     def _initialize_engine_in_thread(self):
-        """Initialize the TensorRT engine in the processing thread"""
         try:
             print("Initializing TensorRT engine in processing thread...")
-            self.seg = TRTSegmentor(self.config["engine_path"])
+            self.seg = OptimizedTRTSegmentor(self.config["engine_path"])
             print("TensorRT engine initialized successfully")
             return True
         except Exception as e:
@@ -362,19 +746,18 @@ class VideoInferenceService_dont:
         print("Video processing stopped and service reset")
         return True
 
-    def _add_csv_data(self, row_number, doughnut_number, status, measurement_difference):
-        """Add donut data to CSV collection"""
+    def _add_csv_data(self, row_number, doughnut_number, status, outer_diameter, inner_diameter):
         csv_row = {
             'row_number': row_number,
             'doughnut_number': doughnut_number,
             'status': status,
-            'measurement_difference': measurement_difference
+            'outer_diameter': outer_diameter,
+            'inner_diameter': inner_diameter
         }
         self.csv_data.append(csv_row)
         print(f"Added to CSV: {csv_row}")
 
     def _save_csv_data(self):
-        """Save CSV data to file"""
         if not self.csv_data:
             print("No CSV data to save")
             return False
@@ -389,7 +772,7 @@ class VideoInferenceService_dont:
             csv_filepath = os.path.join(output_dir, csv_filename)
 
             with open(csv_filepath, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['row_number', 'doughnut_number', 'status', 'measurement_difference']
+                fieldnames = ['row_number', 'doughnut_number', 'status', 'outer_diameter', 'inner_diameter']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(self.csv_data)
@@ -415,11 +798,9 @@ class VideoInferenceService_dont:
             return False
 
     def get_csv_data(self):
-        """Return current CSV data"""
         return {"data": self.csv_data, "row_count": len(self.csv_data)}
 
     def emergency_shutdown(self):
-        """Emergency stop with CSV saving"""
         print("Emergency shutdown initiated")
 
         self.is_running = False
@@ -445,7 +826,6 @@ class VideoInferenceService_dont:
         return True
 
     def _watchdog_monitor(self):
-        """Watchdog monitor for detecting system freezes"""
         print("Watchdog monitor started")
 
         while self.is_running and not self.emergency_stop_event.is_set():
@@ -467,7 +847,6 @@ class VideoInferenceService_dont:
         print("Watchdog monitor stopped")
 
     def reset_to_initial_state(self):
-        """Reset the service back to initial state"""
         print("Resetting VideoInferenceService to initial state...")
 
         try:
@@ -486,7 +865,10 @@ class VideoInferenceService_dont:
         self.inference_active = False
         self.initialization_error = None
         self.last_activity_time = time.time()
-        self.row_tracker = None
+        
+        self.state = "seek"
+        self.locked_slots = []
+        self.gap_t0 = None
 
         self.shutdown_event.clear()
         self.force_stop_event.clear()
@@ -501,7 +883,6 @@ class VideoInferenceService_dont:
         print("Service reset to initial state completed")
 
     def force_stop(self):
-        """Emergency stop function"""
         print("EMERGENCY STOP: Force stopping video processing...")
         self.is_running = False
         self.shutdown_event.set()
@@ -519,15 +900,12 @@ class VideoInferenceService_dont:
         return True
 
     def force_cleanup(self):
-        """Force cleanup of resources"""
         self.reset_to_initial_state()
 
     def is_stuck(self):
-        """Check if processing appears to be stuck"""
         return (time.time() - self.last_activity_time) > self.processing_timeout
 
     def _process_video(self):
-        """Main video processing loop - runs in separate thread"""
         print("Starting video processing thread...")
 
         if not self._initialize_engine_in_thread():
@@ -547,31 +925,24 @@ class VideoInferenceService_dont:
             width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            region_height = self.config["inference_height"]
-            region_width = width
-            region_x = 0
-            region_y = (height - region_height) // 2
-            inference_region = (region_x, region_y, region_width, region_height)
-
-            self.row_tracker = TimeBasedRowTracker(
-                start_time=self.config["row_start_time"],
-                interval=self.config["row_interval"]
-            )
+            x1, y1, x2, y2 = compute_roi_rect(width, height, 
+                                             self.roi_config["cx"], self.roi_config["cy"],
+                                             self.roi_config["w"], self.roi_config["h"])
+            roi_w = x2 - x1
+            roi_h = y2 - y1
+            
+            enable_outer = "outer_diameter" in self.button_set
+            enable_inner = "inner_diameter" in self.button_set
 
             fps_counter = FPSCounter()
             frame_idx = 0
-
-            class_thresholds = {
-                0: self.config.get("class0_threshold") or self.config["score_threshold"],
-                1: self.config.get("class1_threshold") or self.config["score_threshold"],
-                2: self.config.get("class2_threshold") or self.config["score_threshold"],
-            }
+            frame_interval = 1.0 / max(1e-6, self.config["target_fps"])
 
             print("Video processing loop started")
-            print(f"Row detection starts at {self.config['row_start_time']}s, every {self.config['row_interval']}s")
 
             while self.is_running and not self.force_stop_event.is_set():
                 try:
+                    frame_t0 = time.perf_counter()
                     self.last_activity_time = time.time()
 
                     ret, frame = self.cap.read()
@@ -590,15 +961,12 @@ class VideoInferenceService_dont:
                     current_video_time_seconds = current_video_time_ms / 1000.0
 
                     vis = self._process_frame(
-                        frame, current_video_time_seconds, inference_region, 
-                        class_thresholds, frame_idx, frame_count
+                        frame, current_video_time_seconds, x1, y1, x2, y2, roi_w, roi_h,
+                        enable_outer, enable_inner, frame_idx, frame_count
                     )
 
                     fps_counter.update()
                     self.current_fps = fps_counter.get_fps()
-
-                    # self._add_fps_overlay(vis, width)
-                    # self._add_info_overlay(vis, current_video_time_seconds, frame_idx, frame_count, width)
 
                     self._emit_frame(
                         vis,
@@ -606,11 +974,16 @@ class VideoInferenceService_dont:
                             "timestamp": current_video_time_seconds,
                             "fps": self.current_fps,
                             "frame_idx": frame_idx,
-                            "row_number": self.row_tracker.current_row_number if self.row_tracker else 0,
+                            "row_number": self.row_counter,
+                            "state": self.state,
                         },
                     )
 
                     frame_idx += 1
+
+                    sleep_t = frame_interval - (time.perf_counter() - frame_t0)
+                    if sleep_t > 0:
+                        time.sleep(sleep_t)
 
                     if self.shutdown_event.is_set() or self.force_stop_event.is_set():
                         print("Shutdown event received")
@@ -641,224 +1014,154 @@ class VideoInferenceService_dont:
 
             if self.seg:
                 try:
-                    print("Cleaning up TensorRT engine and CUDA context...")
-
-                    if hasattr(self.seg, "context") and self.seg.context:
-                        print("Destroying TensorRT execution context...")
-                        del self.seg.context
-                        self.seg.context = None
-
-                    if hasattr(self.seg, "engine") and self.seg.engine:
-                        print("Destroying TensorRT engine...")
-                        del self.seg.engine
-                        self.seg.engine = None
-
-                    if hasattr(self.seg, "ctx") and self.seg.ctx:
-                        print("Cleaning up CUDA context stack...")
-                        context_count = 0
-                        while True:
-                            try:
-                                self.seg.ctx.pop()
-                                context_count += 1
-                                print(f"Popped context #{context_count}")
-                            except Exception:
-                                print(f"No more contexts to pop (popped {context_count} total)")
-                                break
-
-                        try:
-                            self.seg.ctx.detach()
-                            print("CUDA context detached")
-                        except Exception as detach_error:
-                            print(f"Context detach not needed or failed: {detach_error}")
-
-                        print("CUDA context stack cleaned successfully")
-
+                    self.seg.cleanup()
                 except Exception as e:
-                    print(f"Warning: Error during TensorRT/CUDA cleanup: {e}")
-
+                    print(f"Warning: Error during segmentor cleanup: {e}")
                 finally:
                     self.seg = None
-                    print("TensorRT segmentor cleared")
 
             import gc
             gc.collect()
-            print("Forced garbage collection completed")
             print("Processing thread ending naturally (full cleanup completed)")
             self.is_running = False
 
-    def _process_frame(self, frame, current_video_time_seconds, inference_region, class_thresholds, frame_idx, frame_count):
-        """Process a single frame with donut detection logic"""
+    def _process_frame(self, frame, current_video_time_seconds, x1, y1, x2, y2, roi_w, roi_h, 
+                      enable_outer, enable_inner, frame_idx, frame_count):
         try:
-            height, width = frame.shape[:2]
+            vis = frame.copy()
+            roi = vis[y1:y2, x1:x2].copy()
+
+            lb, scale, left, top = letterbox(roi, size=self.config["canvas_size"], pad_val=114)
+            boxes, labels, scores = self.seg.infer_optimized(lb)
+
+            keep = scores >= self.config["score_threshold"]
+            vis_roi = roi
+            current_goods, current_holes = [], []
+            current_bad_count = 0
+            good_union = np.zeros((roi_h, roi_w), dtype=np.uint8)
+
+            if np.any(keep):
+                boxes_kept = boxes[keep]
+                labels_kept = labels[keep]
+                keep_idx = np.flatnonzero(keep)
+                boxes_roi = unletterbox_boxes(boxes_kept, scale, left, top, roi_w, roi_h)
+
+                if self.config["gpu_roi"] and self.seg.dtype_masks == np.float32:
+                    masks_roi, _ = self.seg.copy_and_resize_masks_roi_gpu(
+                        keep_idx, boxes_roi, scale, left, top, roi_w, roi_h, thr=self.config["mask_threshold"]
+                    )
+                else:
+                    masks_fp, _ = self.seg.copy_masks_optimized(keep_idx, thr=self.config["mask_threshold"])
+                    masks_u8 = (masks_fp.astype(np.uint8) if self.config["engine_binary_masks"]
+                                else ((masks_fp > self.config["mask_threshold"]) * 255).astype(np.uint8) if masks_fp.size > 0
+                                else masks_fp.astype(np.uint8))
+                    masks_roi, _, _ = unletterbox_masks_roi(
+                        masks_u8, boxes_roi, scale, left, top, roi_w, roi_h, max_workers=self.config["workers"]
+                    )
+
+                vis_roi = blend_masks_classwise(roi, masks_roi, labels_kept, alpha=self.config["alpha"])
+
+                current_goods = collect_good_items(labels_kept, masks_roi)
+                if enable_inner:
+                    current_holes = collect_hole_items(labels_kept, masks_roi)
+                current_bad_count = sum(1 for i, lab in enumerate(labels_kept)
+                                        if int(lab) == LABEL_BAD and masks_roi[i].sum() > 0)
+                good_union = compute_good_union_mask(labels_kept, masks_roi, roi_h, roi_w)
+
+                if enable_outer:
+                    for g in current_goods:
+                        y_mid = g["y"] + g["h"] // 2
+                        cv2.line(vis_roi, (g["x"], y_mid), (g["x"] + g["w"], y_mid), COLOR_WHITE, 2)
+                if enable_inner and current_holes:
+                    for h in current_holes:
+                        y_mid = h["y"] + h["h"] // 2
+                        cv2.line(vis_roi, (h["x"], y_mid), (h["x"] + h["w"], y_mid), COLOR_BLACK, 2)
+
+                self._update_state_machine(current_goods, current_holes, good_union, current_bad_count, vis_roi)
+                vis[y1:y2, x1:x2] = vis_roi
+
+            else:
+                self._update_state_machine(current_goods, current_holes, good_union, current_bad_count, vis_roi)
+
+            cv2.rectangle(vis, (x1, y1), (x2, y2), COLOR_BLACK, 2)
             
-            lb, scale, left, top = letterbox(frame, size=self.config["canvas_size"], pad_val=114)
-
-            boxes, labels, scores, _ = self.seg.infer_fast(lb, measure_gpu=False)
-
-            if len(boxes) > 0:
-                filtered_boxes, filtered_labels, filtered_scores, _, keep_indices = filter_by_class_thresholds(
-                    boxes, labels, scores, np.array([]), class_thresholds)
-            else:
-                filtered_boxes, filtered_labels, filtered_scores, keep_indices = boxes, labels, scores, np.array([])
-
-            if len(filtered_boxes) == 0:
-                draw_inference_region(frame, inference_region)
-                return frame
-
-            boxes_img = unletterbox_boxes(filtered_boxes, scale, left, top, width, height)
-
-            if len(keep_indices) > 0:
-                masks_fp, _ = self.seg.copy_masks(keep_indices.astype(np.int64))
-            else:
-                masks_fp = np.array([])
-
-            if masks_fp.size > 0:
-                if self.config["mask_threshold"] > 0:
-                    masks_u8 = (masks_fp > self.config["mask_threshold"]).astype(np.uint8) * 255
-                else:
-                    masks_u8 = masks_fp.astype(np.uint8)
-                
-                if masks_u8.size > 0:
-                    masks_img, _, _ = unletterbox_masks_with_timing(
-                        masks_u8, scale, left, top, width, height)
-                else:
-                    masks_img = np.array([])
-            else:
-                masks_img = np.array([])
-
-            region_boxes, region_labels, region_scores, region_masks = filter_detections_in_region(
-                boxes_img, filtered_labels, filtered_scores, masks_img, inference_region)
-
-            draw_inference_region(frame, inference_region)
-
-            if len(region_boxes) > 0:
-                if region_masks.size > 0:
-                    frame = colorize_doughnut_masks(frame, region_masks, region_boxes, region_labels, self.config["alpha"])
-
-                doughnut_mask = (region_labels == 0) | (region_labels == 1)
-                hole_mask = region_labels == 2
-
-                doughnut_boxes = region_boxes[doughnut_mask]
-                doughnut_labels = region_labels[doughnut_mask]
-                hole_boxes = region_boxes[hole_mask]
-
-                if len(doughnut_boxes) > 0:
-                    numbered_doughnuts = draw_doughnut_numbers(frame, region_boxes, region_labels, inference_region)
-
-                    if numbered_doughnuts and len(hole_boxes) > 0:
-                        matches = match_holes_to_doughnuts(doughnut_boxes, doughnut_labels, hole_boxes)
-
-                        for doughnut_idx, hole_idx in matches:
-                            doughnut_box = doughnut_boxes[doughnut_idx]
-                            hole_box = hole_boxes[hole_idx]
-                            draw_measurement_lines(frame, doughnut_box, hole_box)
-
-                        should_record, row_number = self.row_tracker.should_process_row(current_video_time_seconds)
-
-                        if should_record:
-                            self.row_counter = row_number
-                            print(f"Recording Row {row_number} at video timestamp {current_video_time_seconds:.2f}s with {len(numbered_doughnuts)} doughnuts")
-                            
-                            self._process_row_data(numbered_doughnuts, doughnut_boxes, doughnut_labels, 
-                                                 hole_boxes, matches, region_boxes, row_number)
-
-            return frame
+            return vis
 
         except Exception as e:
             print(f"Error in frame processing: {e}")
             return frame
 
-    def _process_row_data(self, numbered_doughnuts, doughnut_boxes, doughnut_labels, hole_boxes, matches, region_boxes, row_number):
-        """Process and record row data for CSV and MQTT"""
-        try:
-            doughnut_hole_groups = {}
-            for doughnut_idx, hole_idx in matches:
-                if doughnut_idx not in doughnut_hole_groups:
-                    doughnut_hole_groups[doughnut_idx] = []
-                doughnut_hole_groups[doughnut_idx].append(hole_idx)
+    def _update_state_machine(self, current_goods, current_holes, good_union, current_bad_count, vis_roi):
+        if self.state == "seek":
+            if len(current_goods) >= self.config["min_index_count"]:
+                goods_sorted = sorted(current_goods, key=lambda g: g["cy"])
+                self.locked_slots = make_locked_slots_from_goods(goods_sorted, vis_roi.shape[0])
+                self.row_counter += 1
 
-            row_data = []
-
-            for num, orig_idx, _ in numbered_doughnuts:
-                doughnut_found = False
-                for doughnut_idx, (doughnut_box, doughnut_label) in enumerate(zip(doughnut_boxes, doughnut_labels)):
-                    if orig_idx < len(region_boxes) and np.allclose(region_boxes[orig_idx], doughnut_box):
-                        doughnut_found = True
-
-                        if doughnut_idx in doughnut_hole_groups:
-                            hole_indices = doughnut_hole_groups[doughnut_idx]
-
-                            total_measurement_diff = 0
-                            hole_count = len(hole_indices)
-
-                            for hole_idx in hole_indices:
-                                hole_box = hole_boxes[hole_idx]
-                                top_distance, bottom_distance = calculate_measurements(doughnut_box, hole_box)
-                                total_measurement_diff += abs(top_distance - bottom_distance)
-
-                            avg_measurement_diff = total_measurement_diff / hole_count if hole_count > 0 else 0
-                            measurement_value = round(avg_measurement_diff, 2)
-                        else:
-                            measurement_value = "null"
-
-                        status = "good" if doughnut_label == 1 else "bad"
-                        
-                        self._add_csv_data(row_number, num, status, measurement_value)
-                        
-                        row_data.append({
-                            'doughnut_number': num,
-                            'status': status,
-                            'measurement_difference': measurement_value
-                        })
-                        break
-
-                if not doughnut_found:
-                    print(f"Warning: Could not find doughnut {num} in filtered results")
-
-            if self.mqtt_client and row_data:
-                mqtt_payload = {
-                    'row_number': row_number,
-                    'doughnuts': row_data,
-                    'timestamp': time.time(),
-                    'total_doughnuts': len(row_data)
-                }
+                print(f"row {self.row_counter}")
+                print(f" good:{len(goods_sorted)} bad:{current_bad_count}")
+                hole_heights = pair_holes_to_goods(goods_sorted, current_holes) if "inner_diameter" in self.button_set else [0]*len(goods_sorted)
                 
-                payload_json = json.dumps(mqtt_payload)
-                self.mqtt_client.publish(self.config["mqtt_topic"], payload_json)
-                print(f"Published MQTT data for row {row_number}: {len(row_data)} doughnuts")
+                for k, g in enumerate(goods_sorted, start=1):
+                    outer_diam = fmt_len(int(g['h']), self.roi_config["units_per_px"], self.roi_config["units_label"]) if "outer_diameter" in self.button_set else None
+                    inner_diam = fmt_len(int(hole_heights[k-1]) if hole_heights[k-1] else 0, self.roi_config["units_per_px"], self.roi_config["units_label"]) if "inner_diameter" in self.button_set else None
+                    
+                    parts = []
+                    if outer_diam: parts.append(f"d{k}-diameter:{outer_diam}")
+                    if inner_diam: parts.append(f"d{k}-hole:{inner_diam}")
+                    if parts: print(" " + "  ".join(parts))
+                    
+                    status = "good"
+                    self._add_csv_data(self.row_counter, k, status, outer_diam, inner_diam)
 
-        except Exception as e:
-            print(f"Error processing row data: {e}")
+                self.state = "locked"
+                self._draw_annotations(current_goods, vis_roi)
 
-    def _add_fps_overlay(self, vis, width):
-        fps_text = f"FPS: {self.current_fps:.1f}"
-        text_size = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
-        cv2.rectangle(
-            vis,
-            (width - text_size[0] - 20, 100),
-            (width - 5, text_size[1] + 115),
-            (0, 0, 0),
-            -1,
-        )
-        cv2.putText(
-            vis,
-            fps_text,
-            (width - text_size[0] - 15, text_size[1] + 110),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 0),
-            2,
-        )
+        elif self.state == "locked":
+            self._draw_annotations(current_goods, vis_roi)
 
-    def _add_info_overlay(self, vis, current_video_time_seconds, frame_idx, frame_count, width):
-        cv2.putText(vis, f"Time: {current_video_time_seconds:.1f}s", (width - 150, 140), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(vis, f"Frame: {frame_idx+1}/{frame_count}", (width - 150, 180), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        
-        if self.row_tracker:
-            cv2.putText(vis, f"Row: {self.row_tracker.current_row_number}", (width - 150, 220), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            if all_slots_fully_out_left_restricted(good_union, self.locked_slots,
+                                                   left_exit_slack=self.config["left_exit_slack"]):
+                self.state = "gap"
+                self.gap_t0 = time.perf_counter()
+                self.locked_slots = []
+
+        elif self.state == "gap":
+            if (time.perf_counter() - self.gap_t0) >= self.config["gap_delay"]:
+                if len(current_goods) >= self.config["min_index_count"]:
+                    goods_sorted = sorted(current_goods, key=lambda g: g["cy"])
+                    self.locked_slots = make_locked_slots_from_goods(goods_sorted, vis_roi.shape[0])
+                    self.row_counter += 1
+
+                    print(f"row {self.row_counter}")
+                    print(f" good:{len(goods_sorted)} bad:{current_bad_count}")
+                    hole_heights = pair_holes_to_goods(goods_sorted, current_holes) if "inner_diameter" in self.button_set else [0]*len(goods_sorted)
+                    
+                    for k, g in enumerate(goods_sorted, start=1):
+                        outer_diam = fmt_len(int(g['h']), self.roi_config["units_per_px"], self.roi_config["units_label"]) if "outer_diameter" in self.button_set else None
+                        inner_diam = fmt_len(int(hole_heights[k-1]) if hole_heights[k-1] else 0, self.roi_config["units_per_px"], self.roi_config["units_label"]) if "inner_diameter" in self.button_set else None
+                        
+                        parts = []
+                        if outer_diam: parts.append(f"d{k}-diameter:{outer_diam}")
+                        if inner_diam: parts.append(f"d{k}-hole:{inner_diam}")
+                        if parts: print(" " + "  ".join(parts))
+                        
+                        status = "good"
+                        self._add_csv_data(self.row_counter, k, status, outer_diam, inner_diam)
+
+                    self.state = "locked"
+                    self.gap_t0 = None
+                    self._draw_annotations(current_goods, vis_roi)
+
+    def _draw_annotations(self, current_goods, vis_roi):
+        ann = track_locked_slots(current_goods, self.locked_slots,
+                                 tol_y=self.config["match_tol_y"],
+                                 x_forward_slack=self.config["x_forward_slack"])
+        for p in ann:
+            cv2.putText(vis_roi, str(p["idx"]), (p["x"], max(0, p["y"]-6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,0), 4, cv2.LINE_AA)
+            cv2.putText(vis_roi, str(p["idx"]), (p["x"], max(0, p["y"]-6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,255,255), 2, cv2.LINE_AA)
 
     def _emit_frame(self, frame, metadata):
         if not self.socketio or not self.websocket_mode:
@@ -886,324 +1189,6 @@ class VideoInferenceService_dont:
             "initialization_error": self.initialization_error,
             "is_stuck": self.is_stuck(),
             "last_activity": time.time() - self.last_activity_time,
+            "state": self.state,
         }
 
-
-class FPSCounter:
-    def __init__(self, window_size=30):
-        self.times = deque(maxlen=window_size)
-        self.last_time = time.perf_counter()
-
-    def update(self):
-        current_time = time.perf_counter()
-        self.times.append(current_time - self.last_time)
-        self.last_time = current_time
-
-    def get_fps(self):
-        if len(self.times) < 2:
-            return 0.0
-        return len(self.times) / sum(self.times)
-
-
-class TRTSegmentor:
-    def __init__(self, engine_path, verbose=False):
-        print(f"Initializing TRTSegmentor with engine: {engine_path}")
-
-        cuda.init()
-        self.device = cuda.Device(0)
-        self.ctx = self.device.make_context()
-        self.ctx.push()
-
-        try:
-            self.trt10 = int(trt.__version__.split('.')[0]) >= 10
-            logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.ERROR)
-
-            t0 = time.perf_counter()
-            with open(engine_path, "rb") as f:
-                runtime = trt.Runtime(logger)
-                self.engine = runtime.deserialize_cuda_engine(f.read())
-            self.context = self.engine.create_execution_context()
-            t1 = time.perf_counter()
-            self.model_load_s = (t1 - t0)
-
-            names = ([self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
-                     if self.trt10 else
-                     [self.engine.get_binding_name(i) for i in range(self.engine.num_bindings)])
-
-            def has(n):
-                return any(n == x for x in names)
-
-            def find(sub):
-                for n in names:
-                    if sub in n:
-                        return n
-                return None
-
-            self.name_in = "raw_input" if has("raw_input") else find("raw_input")
-            self.name_dets = "dets" if has("dets") else find("dets")
-            self.name_labels = "labels" if has("labels") else find("label")
-            self.name_masks = "masks" if has("masks") else find("mask")
-            if any(x is None for x in [self.name_in, self.name_dets, self.name_labels, self.name_masks]):
-                raise RuntimeError(f"Could not find expected tensors. Found: {names}")
-
-            def nptype_of(name):
-                if self.trt10:
-                    return trt.nptype(self.engine.get_tensor_dtype(name))
-                else:
-                    idx = self.engine.get_binding_index(name)
-                    return trt.nptype(self.engine.get_binding_dtype(idx))
-
-            self.dtype_in = nptype_of(self.name_in)
-            self.dtype_dets = nptype_of(self.name_dets)
-            self.dtype_labels = nptype_of(self.name_labels)
-            self.dtype_masks = nptype_of(self.name_masks)
-
-            def eng_shape(name):
-                return tuple(self.engine.get_tensor_shape(name)) if self.trt10 \
-                       else tuple(self.engine.get_binding_shape(self.engine.get_binding_index(name)))
-
-            def ctx_shape(name):
-                return tuple(self.context.get_tensor_shape(name)) if self.trt10 \
-                       else tuple(self.context.get_binding_shape(self.engine.get_binding_index(name)))
-
-            shp_in_engine = eng_shape(self.name_in)
-
-            if self.trt10:
-                shp_in_rt = shp_in_engine
-                if -1 in shp_in_rt:
-                    H, W = (shp_in_rt[-3], shp_in_rt[-2]) if shp_in_rt[-1] == 3 else (shp_in_rt[-2], shp_in_rt[-1])
-                    shp_in_rt = (1, H if H > 0 else DEFAULT_CANVAS, W if W > 0 else DEFAULT_CANVAS, 3)
-                    self.context.set_input_shape(self.name_in, shp_in_rt)
-            else:
-                b = self.engine.get_binding_index(self.name_in)
-                shp_in_rt = shp_in_engine
-                if -1 in shp_in_engine:
-                    if self.engine.num_optimization_profiles > 0:
-                        self.context.active_optimization_profile = 0
-                    H, W = (shp_in_engine[-3], shp_in_engine[-2]) if shp_in_engine[-1] == 3 else (shp_in_engine[-2], shp_in_engine[-1])
-                    shp_in_rt = (1, H if H > 0 else DEFAULT_CANVAS, W if W > 0 else DEFAULT_CANVAS, 3)
-                    self.context.set_binding_shape(b, shp_in_rt)
-
-            shp_in_rt_now = ctx_shape(self.name_in)
-            shp_dets_ctx = ctx_shape(self.name_dets)
-            shp_dets_eng = eng_shape(self.name_dets)
-            shp_labels_ctx = ctx_shape(self.name_labels)
-            shp_labels_eng = eng_shape(self.name_labels)
-            shp_masks_ctx = ctx_shape(self.name_masks)
-            shp_masks_eng = eng_shape(self.name_masks)
-
-            def finalize(ctx_shp, eng_shp, kind):
-                def ok(s):
-                    return s and all((d is not None and d > 0) for d in s)
-
-                if ok(ctx_shp):
-                    return tuple(ctx_shp)
-                if ok(eng_shp):
-                    return tuple(eng_shp)
-                if kind == "in":
-                    H = eng_shp[-3] if eng_shp and eng_shp[-3] > 0 else DEFAULT_CANVAS
-                    W = eng_shp[-2] if eng_shp and eng_shp[-2] > 0 else DEFAULT_CANVAS
-                    return (1, H, W, 3)
-                if kind == "dets":
-                    N = eng_shp[1] if eng_shp and len(eng_shp) > 1 and eng_shp[1] > 0 else DEFAULT_TOPK
-                    return (1, N, 5)
-                if kind == "labels":
-                    N = shp_dets_eng[1] if shp_dets_eng and len(shp_dets_eng) > 1 and shp_dets_eng[1] > 0 else DEFAULT_TOPK
-                    return (1, N)
-                if kind == "masks":
-                    N = shp_dets_eng[1] if shp_dets_eng and len(shp_dets_eng) > 1 and shp_dets_eng[1] > 0 else DEFAULT_TOPK
-                    Hm = shp_in_rt_now[-3] if shp_in_rt_now and len(shp_in_rt_now) == 4 else DEFAULT_CANVAS
-                    Wm = shp_in_rt_now[-2] if shp_in_rt_now and len(shp_in_rt_now) == 4 else DEFAULT_CANVAS
-                    return (1, N, Hm, Wm)
-                raise ValueError(kind)
-
-            shp_in_final = finalize(shp_in_rt_now, shp_in_engine, "in")
-            shp_dets_final = finalize(shp_dets_ctx, shp_dets_eng, "dets")
-            shp_labels_final = finalize(shp_labels_ctx, shp_labels_eng, "labels")
-            shp_masks_final = finalize(shp_masks_ctx, shp_masks_eng, "masks")
-
-            self.max_det = shp_dets_final[1]
-            self.mask_hw = shp_masks_final[-2:]
-
-            self.dev_ptr, self.host_buf, self.pinned_flag = {}, {}, {}
-
-            def allocate_host(name, shape, dtype, force_pinned=False):
-                numel = int(np.prod(shape))
-                nbytes = numel * np.dtype(dtype).itemsize
-                use_pinned = force_pinned or (nbytes >= PINNED_THRESHOLD_BYTES)
-                buf = (cuda.pagelocked_empty(numel, dtype) if use_pinned else np.empty(numel, dtype=dtype))
-                self.host_buf[name] = buf
-                self.pinned_flag[name] = use_pinned
-                self.dev_ptr[name] = cuda.mem_alloc(nbytes)
-
-            def allocate_dev_only(name, shape, dtype):
-                numel = int(np.prod(shape))
-                nbytes = numel * np.dtype(dtype).itemsize
-                self.dev_ptr[name] = cuda.mem_alloc(nbytes)
-
-            allocate_host(self.name_in, shp_in_final, self.dtype_in)
-            allocate_host(self.name_dets, shp_dets_final, self.dtype_dets, force_pinned=True)
-            allocate_host(self.name_labels, shp_labels_final, self.dtype_labels, force_pinned=True)
-            allocate_dev_only(self.name_masks, shp_masks_final, self.dtype_masks)
-
-            self.stream = cuda.Stream()
-            self.start_evt = cuda.Event()
-            self.end_evt = cuda.Event()
-
-            self.output_boxes = np.empty((self.max_det, 4), dtype=np.float32)
-            self.output_labels = np.empty(self.max_det, dtype=np.int32)
-            self.output_scores = np.empty(self.max_det, dtype=np.float32)
-
-            self.mask_host_capacity = 0
-            self.mask_host_buf = None
-
-            if self.trt10:
-                for n, d in self.dev_ptr.items():
-                    self.context.set_tensor_address(n, int(d))
-            else:
-                self.bindings_order = [None] * self.engine.num_bindings
-                for i in range(self.engine.num_bindings):
-                    n = self.engine.get_binding_name(i)
-                    self.bindings_order[i] = int(self.dev_ptr[n])
-
-            print("TRTSegmentor initialization complete")
-
-        finally:
-            pass
-
-    def infer_fast(self, lb_img_uint8, measure_gpu=False):
-        """Optimized inference with minimal sync points"""
-        np.copyto(self.host_buf[self.name_in], lb_img_uint8.ravel())
-        if self.pinned_flag[self.name_in]:
-            cuda.memcpy_htod_async(self.dev_ptr[self.name_in], self.host_buf[self.name_in], self.stream)
-        else:
-            cuda.memcpy_htod(self.dev_ptr[self.name_in], self.host_buf[self.name_in])
-
-        if measure_gpu:
-            self.stream.synchronize()
-            self.start_evt.record(self.stream)
-
-        if self.trt10:
-            self.context.execute_async_v3(self.stream.handle)
-        else:
-            self.context.execute_async_v2(self.bindings_order, self.stream.handle)
-
-        if measure_gpu:
-            self.end_evt.record(self.stream)
-            self.stream.synchronize()
-            gpu_s = self.start_evt.time_till(self.end_evt) / 1e3
-        else:
-            gpu_s = 0.0
-
-        if not measure_gpu:
-            cuda.memcpy_dtoh_async(self.host_buf[self.name_dets], self.dev_ptr[self.name_dets], self.stream)
-            cuda.memcpy_dtoh_async(self.host_buf[self.name_labels], self.dev_ptr[self.name_labels], self.stream)
-            self.stream.synchronize()
-        else:
-            cuda.memcpy_dtoh(self.host_buf[self.name_dets], self.dev_ptr[self.name_dets])
-            cuda.memcpy_dtoh(self.host_buf[self.name_labels], self.dev_ptr[self.name_labels])
-
-        dets_raw = self.host_buf[self.name_dets].view().reshape(1, self.max_det, 5)[0]
-        labels_raw = self.host_buf[self.name_labels].view().reshape(1, self.max_det)[0]
-
-        np.copyto(self.output_boxes, dets_raw[:, :4])
-        np.copyto(self.output_scores, dets_raw[:, 4])
-        np.copyto(self.output_labels, labels_raw.astype(np.int32))
-
-        return self.output_boxes, self.output_labels, self.output_scores, gpu_s
-
-    def _ensure_mask_host(self, need_count):
-        Hm, Wm = self.mask_hw
-        if self.mask_host_buf is not None and need_count <= self.mask_host_capacity:
-            return
-        new_cap = max(need_count, max(1, self.mask_host_capacity * 2))
-        self.mask_host_buf = cuda.pagelocked_empty((new_cap, Hm, Wm), dtype=self.dtype_masks)
-        self.mask_host_capacity = new_cap
-
-    def copy_masks(self, indices):
-        """Pinned + async D2H for kept slices only."""
-        Hm, Wm = self.mask_hw
-        dtype = self.dtype_masks
-        itemsize = np.dtype(dtype).itemsize
-        slice_bytes = Hm * Wm * itemsize
-
-        if len(indices) == 0:
-            return np.empty((0, Hm, Wm), dtype=dtype), 0.0
-
-        self._ensure_mask_host(len(indices))
-        mask_stream = cuda.Stream()
-        t0 = time.perf_counter()
-        base_addr = int(self.dev_ptr[self.name_masks])
-        for k, idx in enumerate(indices):
-            src = base_addr + int(idx) * slice_bytes
-            dst = self.mask_host_buf[k].ravel()
-            cuda.memcpy_dtoh_async(dst, src, mask_stream)
-        mask_stream.synchronize()
-        t1 = time.perf_counter()
-        return np.array(self.mask_host_buf[:len(indices)]), (t1 - t0)
-
-    def cleanup(self):
-        """Clean up all CUDA resources with timeout protection"""
-        print("Cleaning up TRTSegmentor CUDA resources...")
-
-        cleanup_start_time = time.time()
-        cleanup_timeout = 5.0
-
-        try:
-            try:
-                if hasattr(self, "stream") and self.stream:
-                    print("Synchronizing CUDA stream...")
-                    self.stream.synchronize()
-                    print("CUDA stream synchronized")
-            except Exception as e:
-                print(f"Warning: Could not synchronize CUDA stream: {e}")
-
-            if time.time() - cleanup_start_time > cleanup_timeout:
-                print("Cleanup timeout reached during stream sync - aborting")
-                return
-
-            print("Freeing device memory...")
-            freed_count = 0
-            for name, ptr in list(self.dev_ptr.items()):
-                try:
-                    if ptr:
-                        ptr.free()
-                        freed_count += 1
-                except Exception as e:
-                    print(f"Warning: Error freeing device memory for {name}: {e}")
-
-                if time.time() - cleanup_start_time > cleanup_timeout:
-                    print(f"Cleanup timeout reached - freed {freed_count}/{len(self.dev_ptr)} buffers")
-                    break
-
-            print(f"Freed {freed_count} device memory buffers")
-
-            self.host_buf.clear()
-            self.dev_ptr.clear()
-            self.pinned_flag.clear()
-
-            self.mask_host_buf = None
-            self.mask_host_capacity = 0
-
-            print("CUDA resources cleanup attempted")
-
-        except Exception as e:
-            print(f"Warning: Error during CUDA resource cleanup: {e}")
-
-        finally:
-            print("Detaching CUDA context...")
-            try:
-                if hasattr(self, "ctx") and self.ctx:
-                    self.ctx.pop()
-                    self.ctx.detach()
-                    print("CUDA context detached successfully")
-            except Exception as e:
-                print(f"Warning: TensorRT context cleanup error (IGNORED): {e}")
-                print("This TensorRT cleanup warning can be safely ignored")
-
-            try:
-                time.sleep(0.1)
-            except:
-                pass
-
-            print("TensorRT cleanup completed (with warnings ignored)")

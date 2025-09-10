@@ -382,14 +382,23 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
       };
 
       console.log("Measurement Result:", JSON.stringify(resultData, null, 2));
-
-      alert(
-        `Calibration Complete!\nPixel Distance: ${originalPixelDistance.toFixed(
-          2
-        )} px\nActual Length: ${lengthMm} mm\nScale: ${mmPerPixel.toFixed(
-          4
-        )} mm/pixel`
-      );
+      fetch("http://localhost:5000/api/set_config_json", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(resultData),
+      }).then((res) => {
+        if (res.ok) {
+          alert(
+            `Calibration Complete!\nPixel Distance: ${originalPixelDistance.toFixed(
+              2
+            )} px\nActual Length: ${lengthMm} mm\nScale: ${mmPerPixel.toFixed(
+              4
+            )} mm/pixel`
+          );
+        }
+      });
 
       setShowInput(false);
     }

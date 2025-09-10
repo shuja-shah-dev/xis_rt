@@ -126,7 +126,10 @@ def start_normal_stream():
                         )
 
             elif RUNTIME_CONFIG.get("video_mode") == "donut":
-
+                RUNTIME_CONFIG["config_path"] = os.path.join(
+                    os.path.dirname(__file__), "m.json"
+                )
+                RUNTIME_CONFIG["button"] = "[outer_diameter,inner_diameter]"
                 video_service = get_video_dont()
                 video_service.stop_processing()
                 if video_service.initialize_from_config(RUNTIME_CONFIG):
@@ -349,6 +352,35 @@ def set_src_video():
 
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+
+import json
+import os
+from flask import request, jsonify
+
+
+@inference_bp.route("/set_config_json", methods=["POST"])
+def set_config_json():
+    try:
+        config_data = request.get_json()
+
+        if config_data is None:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        file_path = os.path.join(os.path.dirname(__file__), "m.json")
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=4, ensure_ascii=False)
+
+        return (
+            jsonify(
+                {"message": "Configuration saved successfully", "file_path": file_path}
+            ),
+            200,
+        )
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to save configuration: {str(e)}"}), 500
 
 
 def register_socketio_events(socketio_instance, genicam_service_instance=None):

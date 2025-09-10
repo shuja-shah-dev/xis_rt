@@ -37,7 +37,7 @@ class AppConfig:
             self.video_on = "raw_dough"
         elif src == "donut":
             self.video_path = os.path.join(
-                os.path.dirname(__file__), "runtime_videos", "donut.avi"
+                os.path.dirname(__file__), "runtime_videos", "donut.mp4"
             )
             self.video_on = "donut"
 
