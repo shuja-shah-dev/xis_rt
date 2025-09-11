@@ -200,14 +200,14 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
               )
             }
             className={`px-5 py-2 rounded-xl text-white text-md transition-colors ${disconnecting ||
-                (
-                  videoMode !== "donut" &&
-                  videoMode !== "baked_baguette" &&
-                  selectedCamera === "Video As Webcam" &&
-                  !videoEnded
-                )
-                ? "bg-gray-500 cursor-not-allowed"
-                : "bg-[#dc2626] hover:bg-red-700 cursor-pointer"
+              (
+                videoMode !== "donut" &&
+                videoMode !== "baked_baguette" &&
+                selectedCamera === "Video As Webcam" &&
+                !videoEnded
+              )
+              ? "bg-gray-500 cursor-not-allowed"
+              : "bg-[#dc2626] hover:bg-red-700 cursor-pointer"
               }`}
           >
             {disconnecting ? "Disconnecting..." : "Disconnect"}
@@ -226,7 +226,7 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
 
       </div>
 
-      <div className="mt-6 flex justify-end gap-4">
+      {/* <div className="mt-6 flex justify-end gap-4">
         {[
           { name: "Outer Diameter", mode: "donut" },
           { name: "Inner Diameter", mode: "donut" },
@@ -251,7 +251,37 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
             </button>
           );
         })}
+      </div> */}
+
+      <div className="mt-6 flex justify-end gap-4">
+        {[
+          { name: "Outer Diameter", mode: "donut", img: "/icons/2.PNG" },
+          { name: "Inner Diameter", mode: "donut", img: "/icons/1.png" },
+          { name: "Width", mode: "baked_baguette", img: "/icons/3.PNG" },
+          { name: "Height", mode: "baked_baguette", img: "/icons/4.png" },
+        ].map((item) => {
+          const enabled = videoMode === item.mode;
+          const selected = selectedMeasurements.includes(item.name);
+
+          return (
+            <div
+              key={item.name}
+              onClick={() => enabled && toggleMeasurement(item.name)}
+              className={` w-[200px] h-[160px] rounded-2xl border p-4 flex flex-col text-black items-center justify-center gap-2 transition-colors shadow-sm border-[#0E2332] bg-[rgba(255,255,255,.8)] backdrop-blur-[106px] border-3
+          ${!enabled
+                  ? "  cursor-not-allowed"
+                  : selected
+                    ? "cursor-pointer hover:border-[#1272E5] border-[#1272E5]"
+                    : "cursor-pointer hover:border-[#1272E5]"
+                }`}
+            >
+              <img src={item.img} alt={item.name} className="w-26 h-26 object-contain" />
+              <span className="text-sm font-medium"> Measure {item.name}</span>
+            </div>
+          );
+        })}
       </div>
+
 
       {/* Status */}
       {streaming && (
