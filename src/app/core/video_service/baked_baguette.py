@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import time
 import cv2
@@ -5,42 +7,690 @@ import numpy as np
 import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
-from collections import deque
+from pycuda.compiler import SourceModule
+from collections import deque, defaultdict
 import json
 import os
 import threading
 import queue
 import base64
 import csv
+from concurrent.futures import ThreadPoolExecutor
+import warnings
 
-PINNED_THRESHOLD_BYTES = 32 * 1024 * 1024
-DEFAULT_TOPK = 100
-DEFAULT_CANVAS = 640
-CV_CN_MAX_SAFE = 256
+warnings.filterwarnings('ignore')
 
+PINNED_THRESHOLD_BYTES = 16 * 1024 * 1024
+TARGET_FPS = 30.0
 
-def apply_nms(boxes, scores, labels, nms_threshold=0.5):
-    """Apply Non-Maximum Suppression to remove overlapping detections"""
-    if len(boxes) == 0:
-        return np.array([]), np.array([]), np.array([])
+COLOR_GREEN = (0, 255, 0)
+COLOR_WHITE = (255, 255, 255)
+COLOR_BLACK = (0, 0, 0)
 
-    boxes_xywh = boxes.copy()
-    boxes_xywh[:, 2] = boxes_xywh[:, 2] - boxes_xywh[:, 0]
-    boxes_xywh[:, 3] = boxes_xywh[:, 3] - boxes_xywh[:, 1]
+def clamp_roi(cx, cy, w, h, img_w, img_h):
+    x1 = int(round(cx - w / 2)); y1 = int(round(cy - h / 2))
+    x2 = x1 + int(w);            y2 = y1 + int(h)
+    x1 = max(0, min(img_w - 1, x1)); y1 = max(0, min(img_h - 1, y1))
+    x2 = max(0, min(img_w, x2));     y2 = max(0, min(img_h, y2))
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("Invalid ROI after clamping.")
+    return x1, y1, x2, y2
 
-    indices = cv2.dnn.NMSBoxes(
-        boxes_xywh.tolist(),
-        scores.tolist(),
-        score_threshold=0.0,
-        nms_threshold=nms_threshold,
-    )
+def letterbox(img, size=640, pad_val=114):
+    h, w = img.shape[:2]
+    scale = min(size / h, size / w)
+    new_w, new_h = int(round(w * scale)), int(round(h * scale))
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((size, size, 3), pad_val, dtype=np.uint8)
+    top, left = (size - new_h) // 2, (size - new_w) // 2
+    canvas[top:top + new_h, left:left + new_w] = resized
+    return canvas, scale, left, top
 
-    if len(indices) > 0:
-        indices = indices.flatten()
-        return boxes[indices], scores[indices], labels[indices]
+def unletterbox_boxes(boxes_xyxy, scale, left, top, out_w, out_h):
+    if boxes_xyxy.size == 0:
+        return boxes_xyxy
+    out = boxes_xyxy.astype(np.float32, copy=False)
+    out[:, [0, 2]] = np.clip((out[:, [0, 2]] - left) / scale, 0, out_w - 1)
+    out[:, [1, 3]] = np.clip((out[:, [1, 3]] - top) / scale, 0, out_h - 1)
+    return out
+
+def unletterbox_masks_roi(masks_u8, boxes_img, scale, left, top, out_w, out_h, max_workers=4):
+    if masks_u8.size == 0:
+        return masks_u8, 0.0, 0.0
+
+    t0 = time.perf_counter()
+    N, Hm, Wm = masks_u8.shape
+    out_masks = np.zeros((N, out_h, out_w), dtype=np.uint8)
+
+    boxes_img = boxes_img.astype(np.float32, copy=False)
+
+    x1 = np.clip(left + boxes_img[:, 0] * scale, 0, Wm).astype(np.int32)
+    y1 = np.clip(top  + boxes_img[:, 1] * scale, 0, Hm).astype(np.int32)
+    x2 = np.clip(left + boxes_img[:, 2] * scale, 0, Wm).astype(np.int32)
+    y2 = np.clip(top  + boxes_img[:, 3] * scale, 0, Hm).astype(np.int32)
+
+    dx1 = np.clip(boxes_img[:, 0], 0, out_w).astype(np.int32)
+    dy1 = np.clip(boxes_img[:, 1], 0, out_h).astype(np.int32)
+    dx2 = np.clip(boxes_img[:, 2], 0, out_w).astype(np.int32)
+    dy2 = np.clip(boxes_img[:, 3], 0, out_h).astype(np.int32)
+
+    t1 = time.perf_counter()
+    prep_time = t1 - t0
+
+    def place(i):
+        if x2[i] <= x1[i] or y2[i] <= y1[i] or dx2[i] <= dx1[i] or dy2[i] <= dy1[i]:
+            return
+        src = masks_u8[i, y1[i]:y2[i], x1[i]:x2[i]]
+        if src.size == 0:
+            return
+        w_dst = int(dx2[i] - dx1[i])
+        h_dst = int(dy2[i] - dy1[i])
+        dst_roi = cv2.resize(src, (w_dst, h_dst), interpolation=cv2.INTER_NEAREST)
+        out_masks[i, dy1[i]:dy2[i], dx1[i]:dx2[i]] = dst_roi
+
+    t2 = time.perf_counter()
+    if N > 3:
+        with ThreadPoolExecutor(max_workers=min(max_workers, N)) as ex:
+            list(ex.map(place, range(N)))
     else:
-        return np.array([]), np.array([]), np.array([])
+        for i in range(N):
+            place(i)
+    t3 = time.perf_counter()
+    resize_time = t3 - t2
 
+    return out_masks, prep_time, resize_time
+
+def tray_is_complete(mask_u8, margin_px=2):
+    if mask_u8.size == 0:
+        return False
+    h, w = mask_u8.shape
+    if (mask_u8[:margin_px, :].any() or mask_u8[-margin_px:, :].any() or
+        mask_u8[:, :margin_px].any() or mask_u8[:, -margin_px:].any()):
+        return False
+    return mask_u8.any()
+
+def pick_complete_tray(tray_masks):
+    best_idx, best_area = -1, 0
+    for i, m in enumerate(tray_masks):
+        if tray_is_complete(m, margin_px=2):
+            area = int((m > 0).sum())
+            if area > best_area:
+                best_idx, best_area = i, area
+    return best_idx
+
+def mask_iou(a_u8, b_u8):
+    if a_u8 is None or b_u8 is None:
+        return 0.0
+    if a_u8.shape != b_u8.shape:
+        return 0.0
+    a = (a_u8 > 0).astype(np.uint8)
+    b = (b_u8 > 0).astype(np.uint8)
+    inter = (a & b).sum()
+    union = (a | b).sum()
+    return float(inter) / float(union) if union > 0 else 0.0
+
+def order_baguettes_row_major(bag_items):
+    def key_fn(item):
+        x1,y1,x2,y2 = item["bbox"]
+        cx = (x1+x2)*0.5
+        cy = (y1+y2)*0.5
+        return (cy, cx)
+    return sorted(bag_items, key=key_fn)
+
+def visualize_baguettes_and_tray(full_frame_bgr, roi_rect, baguette_masks_roi, tray_mask_roi, alpha=0.45):
+    rx1, ry1, rx2, ry2 = roi_rect
+    vis = full_frame_bgr
+
+    if tray_mask_roi is not None and tray_mask_roi.any():
+        contours, _ = cv2.findContours(tray_mask_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            cnt = cnt + np.array([[rx1, ry1]], dtype=np.int32)
+            cv2.polylines(vis, [cnt], isClosed=True, color=(255, 255, 255), thickness=2)
+
+    if len(baguette_masks_roi) > 0:
+        roi_view = vis[ry1:ry2, rx1:rx2]
+        base = roi_view.copy()
+        green = np.zeros_like(roi_view)
+        green[:, :, 1] = 255
+        union = np.zeros((roi_view.shape[0], roi_view.shape[1]), dtype=np.uint8)
+        for m in baguette_masks_roi:
+            if m.shape[:2] != union.shape:
+                m = cv2.resize(m, (union.shape[1], union.shape[0]), interpolation=cv2.INTER_NEAREST)
+            union = cv2.bitwise_or(union, (m > 0).astype(np.uint8))
+        blended = cv2.addWeighted(base, 1.0 - alpha, green, alpha, 0.0)
+        cv2.copyTo(blended, union, roi_view)
+
+    cv2.rectangle(vis, (rx1, ry1), (rx2, ry2), (0, 0, 0), 2)
+
+    return vis
+
+def draw_measurement_lines(frame_bgr, roi_rect, bag_items, draw_height, draw_width):
+    rx1, ry1, rx2, ry2 = roi_rect
+    for item in bag_items:
+        x1,y1,x2,y2 = item["bbox"]
+        fx1, fy1, fx2, fy2 = int(rx1 + x1), int(ry1 + y1), int(rx1 + x2), int(ry1 + y2)
+        cx = (fx1 + fx2) // 2
+        cy = (fy1 + fy2) // 2
+        if draw_height:
+            cv2.line(frame_bgr, (cx, fy1), (cx, fy2), (255,255,255), 1)
+        if draw_width:
+            cv2.line(frame_bgr, (fx1, cy), (fx2, cy), (255,255,255), 1)
+    return frame_bgr
+
+def load_config(path):
+    with open(path, 'r') as f:
+        cfg = json.load(f)
+    roi = cfg.get("ROI", {})
+    cx = int(float(roi.get("x", "0")))
+    cy = int(float(roi.get("y", "0")))
+    h  = int(float(roi.get("height", "0")))
+    w  = int(float(roi.get("width", "0")))
+    ref = cfg.get("reference", {})
+    pix_len = float(ref.get("pixel_length", "1"))
+    act_len = float(ref.get("actual_length", "1"))
+    mm_per_px = act_len / pix_len if pix_len != 0 else 0.0
+    unit = ref.get("unit", "mm")
+    return (cx, cy, w, h), mm_per_px, unit
+
+def parse_button_array(s):
+    if s is None:
+        return []
+    txt = s.strip()
+    if not txt:
+        return []
+    try:
+        inner = txt.strip()
+        if inner.startswith('[') and inner.endswith(']'):
+            inner_content = inner[1:-1].strip()
+            if inner_content and all(ch not in inner_content for ch in "'\""):
+                parts = [p.strip() for p in inner_content.split(',') if p.strip()]
+                quoted = "[" + ",".join(f"\"{p}\"" for p in parts) + "]"
+                arr = json.loads(quoted)
+            else:
+                arr = json.loads(inner.replace("'", "\""))
+        else:
+            arr = json.loads(txt.replace("'", "\""))
+        res = [str(x).lower() for x in arr if isinstance(x, (str, int, float))]
+    except Exception:
+        if txt.startswith('[') and txt.endswith(']'):
+            txt = txt[1:-1]
+        res = [p.strip().lower().strip('\'"') for p in txt.split(',') if p.strip()]
+    allowed = {'height', 'width'}
+    return [x for x in res if x in allowed]
+
+def fmt_measurement(px_val: int, scale_units_per_px, unit_label: str):
+    if scale_units_per_px is None:
+        return f"{int(px_val)}px"
+    else:
+        return f"{int(px_val)}px ({int(round(px_val*scale_units_per_px))}{unit_label})"
+
+class OptimizedTRTSegmentor:
+    def __init__(self, engine_path, verbose=False):
+        print(f"Initializing TRTSegmentor with engine: {engine_path}")
+        
+        cuda.init()
+        self.device = cuda.Device(0)
+        self.ctx = self.device.make_context()
+        self.ctx.push()
+        
+        try:
+            self.trt10 = int(trt.__version__.split('.')[0]) >= 10
+            logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.ERROR)
+
+            t0 = time.perf_counter()
+            with open(engine_path, "rb") as f:
+                runtime = trt.Runtime(logger)
+                self.engine = runtime.deserialize_cuda_engine(f.read())
+            self.context = self.engine.create_execution_context()
+            t1 = time.perf_counter()
+            self.model_load_s = (t1 - t0)
+
+            self._setup_io()
+            self.stream = cuda.Stream()
+            self.start_evt = cuda.Event()
+            self.end_evt = cuda.Event()
+
+            self.output_boxes = np.empty((self.max_det, 4), dtype=np.float32)
+            self.output_labels = np.empty(self.max_det, dtype=np.int32)
+            self.output_scores = np.empty(self.max_det, dtype=np.float32)
+
+            self.mask_host_capacity = 0
+            self.mask_host_buf = None
+
+            self._thresh_mod = SourceModule(r"""
+            extern "C" __global__
+            void thresh_u8(const float* __restrict__ src,
+                           unsigned char* __restrict__ dst,
+                           int n, int src_offset, int dst_offset, float thr) {
+                int i = blockDim.x * blockIdx.x + threadIdx.x;
+                if (i < n) {
+                    float v = src[src_offset + i];
+                    dst[dst_offset + i] = (unsigned char)((v > thr) ? 255 : 0);
+                }
+            }
+            """)
+            self._k_thresh = self._thresh_mod.get_function("thresh_u8")
+
+            self.dev_masks_u8 = None
+            self.u8_capacity = 0
+            self.mask_host_buf_u8 = None
+
+            self._roi_mod = SourceModule(r"""
+            extern "C" __global__
+            void resize_thresh_roi(
+                const float* __restrict__ src,
+                int Hm, int Wm,
+                int src_offset_elems,
+                int sx, int sy, int sw, int sh,
+                unsigned char* __restrict__ dst,
+                int dst_offset_elems,
+                int dw, int dh,
+                float thr
+            ){
+                int x = blockDim.x * blockIdx.x + threadIdx.x;
+                int y = blockDim.y * blockIdx.y + threadIdx.y;
+                if (x >= dw || y >= dh) return;
+
+                float fx = ((x + 0.5f) * (float)sw / (float)dw) - 0.5f;
+                float fy = ((y + 0.5f) * (float)sh / (float)dh) - 0.5f;
+                int ix = sx + (int)roundf(fx);
+                int iy = sy + (int)roundf(fy);
+                ix = max(0, min(Wm - 1, ix));
+                iy = max(0, min(Hm - 1, iy));
+
+                float v = src[src_offset_elems + iy * Wm + ix];
+                dst[dst_offset_elems + y * dw + x] = (unsigned char)(v > thr ? 255 : 0);
+            }
+            """)
+            self._k_roi = self._roi_mod.get_function("resize_thresh_roi")
+
+            self.dev_rois_u8 = None
+            self.host_rois_u8 = None
+            self.roi_bytes_capacity = 0
+
+            self._warmup_cv2()
+            
+            print("TRTSegmentor initialization complete")
+            
+        finally:
+            pass
+
+    def _setup_io(self):
+        if self.trt10:
+            names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
+        else:
+            names = [self.engine.get_binding_name(i) for i in range(self.engine.num_bindings)]
+        def find_tensor(keywords):
+            for name in names:
+                if any(kw in name.lower() for kw in keywords):
+                    return name
+            return None
+        self.name_in = find_tensor(['raw_input', 'input'])
+        self.name_dets = find_tensor(['det', 'boxes'])
+        self.name_labels = find_tensor(['label', 'class'])
+        self.name_masks = find_tensor(['mask', 'seg'])
+        if any(x is None for x in [self.name_in, self.name_dets, self.name_labels, self.name_masks]):
+            raise RuntimeError("Could not find required tensors")
+        if self.trt10:
+            self.dtype_in = trt.nptype(self.engine.get_tensor_dtype(self.name_in))
+            self.dtype_dets = trt.nptype(self.engine.get_tensor_dtype(self.name_dets))
+            self.dtype_labels = trt.nptype(self.engine.get_tensor_dtype(self.name_labels))
+            self.dtype_masks = trt.nptype(self.engine.get_tensor_dtype(self.name_masks))
+        else:
+            def get_dtype(name):
+                idx = self.engine.get_binding_index(name)
+                return trt.nptype(self.engine.get_binding_dtype(idx))
+            self.dtype_in = get_dtype(self.name_in)
+            self.dtype_dets = get_dtype(self.name_dets)
+            self.dtype_labels = get_dtype(self.name_labels)
+            self.dtype_masks = get_dtype(self.name_masks)
+        self._allocate_buffers()
+
+    def _allocate_buffers(self):
+        self.input_shape = (1, 640, 640, 3)
+        self.max_det = 100
+        self.mask_hw = (640, 640)
+        self.dev_ptr, self.host_buf, self.pinned_flag = {}, {}, {}
+
+        def allocate(name, shape, dtype, force_pinned=False):
+            numel = int(np.prod(shape))
+            nbytes = numel * np.dtype(dtype).itemsize
+            use_pinned = force_pinned or (nbytes >= PINNED_THRESHOLD_BYTES)
+            if use_pinned:
+                buf = cuda.pagelocked_empty(numel, dtype)
+            else:
+                buf = np.empty(numel, dtype=dtype)
+            self.host_buf[name] = buf
+            self.pinned_flag[name] = use_pinned
+            self.dev_ptr[name] = cuda.mem_alloc(nbytes)
+
+        allocate(self.name_in, self.input_shape, self.dtype_in)
+        allocate(self.name_dets, (1, self.max_det, 5), self.dtype_dets, force_pinned=True)
+        allocate(self.name_labels, (1, self.max_det), self.dtype_labels, force_pinned=True)
+
+        mask_shape = (1, self.max_det, *self.mask_hw)
+        mask_bytes = int(np.prod(mask_shape)) * np.dtype(self.dtype_masks).itemsize
+        self.dev_ptr[self.name_masks] = cuda.mem_alloc(mask_bytes)
+
+        if self.trt10:
+            for name, ptr in self.dev_ptr.items():
+                self.context.set_tensor_address(name, int(ptr))
+        else:
+            self.bindings = [None] * self.engine.num_bindings
+            for i in range(self.engine.num_bindings):
+                name = self.engine.get_binding_name(i)
+                self.bindings[i] = int(self.dev_ptr[name])
+
+    def _warmup_cv2(self):
+        dummy = np.zeros((100, 100), dtype=np.uint8)
+        _ = cv2.resize(dummy, (200, 200), interpolation=cv2.INTER_NEAREST)
+
+    def _ensure_u8_capacity(self, needed_masks):
+        Hm, Wm = self.mask_hw
+        max_reasonable_capacity = 200
+        needed_capacity = min(needed_masks, max_reasonable_capacity)
+        
+        if needed_capacity <= getattr(self, "u8_capacity", 0): return
+        
+        current_cap = getattr(self, "u8_capacity", 0)
+        if current_cap > needed_capacity * 4:
+            needed_capacity = max(needed_capacity * 2, 32)
+        else:
+            needed_capacity = max(needed_capacity * 2, 32)
+            
+        needed_capacity = min(needed_capacity, max_reasonable_capacity)
+        
+        self.u8_capacity = needed_capacity
+        bytes_u8 = self.u8_capacity * Hm * Wm
+        if getattr(self, "dev_masks_u8", None) is not None: self.dev_masks_u8.free()
+        self.dev_masks_u8 = cuda.mem_alloc(bytes_u8)
+        self.mask_host_buf_u8 = cuda.pagelocked_empty((self.u8_capacity, Hm, Wm), dtype=np.uint8)
+
+    def _ensure_roi_bytes(self, needed_bytes):
+        max_reasonable_bytes = 50 * 1024 * 1024
+        needed_bytes = min(needed_bytes, max_reasonable_bytes)
+        
+        if needed_bytes <= getattr(self, "roi_bytes_capacity", 0): return
+        
+        current_cap = getattr(self, "roi_bytes_capacity", 0)
+        if current_cap > needed_bytes * 4:
+            needed_bytes = max(needed_bytes * 2, 1 << 20)
+        else:
+            needed_bytes = max(needed_bytes * 2, 1 << 20)
+            
+        needed_bytes = min(needed_bytes, max_reasonable_bytes)
+        
+        self.roi_bytes_capacity = needed_bytes
+        if getattr(self, "dev_rois_u8", None) is not None: self.dev_rois_u8.free()
+        self.dev_rois_u8 = cuda.mem_alloc(self.roi_bytes_capacity)
+        self.host_rois_u8 = cuda.pagelocked_empty(self.roi_bytes_capacity, dtype=np.uint8)
+
+    def infer_optimized(self, img_uint8):
+        np.copyto(self.host_buf[self.name_in], img_uint8.ravel())
+        cuda.memcpy_htod_async(self.dev_ptr[self.name_in], self.host_buf[self.name_in], self.stream)
+        self.start_evt.record(self.stream)
+        if self.trt10:
+            self.context.execute_async_v3(self.stream.handle)
+        else:
+            self.context.execute_async_v2(self.bindings, self.stream.handle)
+        self.end_evt.record(self.stream)
+        cuda.memcpy_dtoh_async(self.host_buf[self.name_dets], self.dev_ptr[self.name_dets], self.stream)
+        cuda.memcpy_dtoh_async(self.host_buf[self.name_labels], self.dev_ptr[self.name_labels], self.stream)
+        self.stream.synchronize()
+
+        dets_raw = self.host_buf[self.name_dets].reshape(1, self.max_det, 5)[0]
+        labels_raw = self.host_buf[self.name_labels].reshape(1, self.max_det)[0]
+        self.output_boxes[...] = dets_raw[:, :4]
+        self.output_scores[...] = dets_raw[:, 4]
+        self.output_labels[...] = labels_raw.astype(np.int32, copy=False)
+        return self.output_boxes, self.output_labels, self.output_scores, {}
+
+    def copy_masks_optimized(self, indices, thr=0.5):
+        timings = {"d2h_s": 0.0, "gpu_thresh_s": 0.0, "total_s": 0.0}
+        if len(indices) == 0:
+            return np.empty((0, *self.mask_hw), dtype=self.dtype_masks), timings
+
+        t_total0 = time.perf_counter()
+        Hm, Wm = self.mask_hw
+        n_masks = len(indices)
+        n_pix = Hm * Wm
+        itemsize = np.dtype(self.dtype_masks).itemsize
+        slice_bytes = Hm * Wm * itemsize
+        base_addr = int(self.dev_ptr[self.name_masks])
+
+        if self.dtype_masks == np.uint8:
+            if self.mask_host_buf is None or self.mask_host_capacity < n_masks:
+                self.mask_host_capacity = max(n_masks * 2, 32)
+                self.mask_host_buf = cuda.pagelocked_empty((self.mask_host_capacity, Hm, Wm), dtype=self.dtype_masks)
+            t0 = time.perf_counter()
+            if n_masks > 1 and np.all(np.diff(indices) == 1):
+                src = int(base_addr + int(indices[0]) * slice_bytes)
+                cuda.memcpy_dtoh_async(self.mask_host_buf[:n_masks].ravel(), src, stream=self.stream)
+            else:
+                for k, idx in enumerate(indices):
+                    src = int(base_addr + int(idx) * slice_bytes)
+                    dst = self.mask_host_buf[k].ravel()
+                    cuda.memcpy_dtoh_async(dst, src, stream=self.stream)
+            self.stream.synchronize()
+            timings["d2h_s"] = time.perf_counter() - t0
+            timings["total_s"] = time.perf_counter() - t_total0
+            return self.mask_host_buf[:n_masks].copy(), timings
+
+        self._ensure_u8_capacity(n_masks)
+        threads = 256
+        t_gpu0 = time.perf_counter()
+        for k, idx in enumerate(indices):
+            src_offset = int(idx) * (Hm * Wm)
+            dst_offset = k * (Hm * Wm)
+            grid = (((Hm * Wm) + threads - 1) // threads, 1, 1)
+            self._k_thresh(
+                self.dev_ptr[self.name_masks],
+                self.dev_masks_u8,
+                np.int32(Hm * Wm),
+                np.int32(src_offset),
+                np.int32(dst_offset),
+                np.float32(thr),
+                block=(threads, 1, 1), grid=grid, stream=self.stream
+            )
+        self.stream.synchronize()
+        timings["gpu_thresh_s"] = time.perf_counter() - t_gpu0
+
+        t_d2h0 = time.perf_counter()
+        cuda.memcpy_dtoh_async(self.mask_host_buf_u8[:n_masks].ravel(), int(self.dev_masks_u8), stream=self.stream)
+        self.stream.synchronize()
+        timings["d2h_s"] = time.perf_counter() - t_d2h0
+        timings["total_s"] = time.perf_counter() - t_total0
+        return self.mask_host_buf_u8[:n_masks].copy(), timings
+
+    def copy_and_resize_masks_roi_gpu(self, indices, boxes_img, scale, left, top, out_w, out_h, thr=0.5):
+        timings = {"prep_cpu_s": 0.0, "kernel_s": 0.0, "d2h_s": 0.0, "paste_cpu_s": 0.0, "total_s": 0.0}
+        if len(indices) == 0:
+            return np.empty((0, out_h, out_w), dtype=np.uint8), timings
+        if self.dtype_masks != np.float32:
+            raise RuntimeError("GPU ROI path expects float32 mask output from engine.")
+
+        t_total0 = time.perf_counter()
+        Hm, Wm = self.mask_hw
+        n_pix = Hm * Wm
+        N = len(indices)
+        boxes_img = boxes_img.astype(np.float32, copy=False)
+
+        t_p0 = time.perf_counter()
+        sx = np.clip(left + boxes_img[:,0] * scale, 0, Wm).astype(np.int32)
+        sy = np.clip(top  + boxes_img[:,1] * scale, 0, Hm).astype(np.int32)
+        ex = np.clip(left + boxes_img[:,2] * scale, 0, Wm).astype(np.int32)
+        ey = np.clip(top  + boxes_img[:,3] * scale, 0, Hm).astype(np.int32)
+        sw = np.maximum(ex - sx, 0).astype(np.int32)
+        sh = np.maximum(ey - sy, 0).astype(np.int32)
+
+        dx = np.clip(boxes_img[:,0], 0, out_w).astype(np.int32)
+        dy = np.clip(boxes_img[:,1], 0, out_h).astype(np.int32)
+        ex2 = np.clip(boxes_img[:,2], 0, out_w).astype(np.int32)
+        ey2 = np.clip(boxes_img[:,3], 0, out_h).astype(np.int32)
+        dw = np.maximum(ex2 - dx, 0).astype(np.int32)
+        dh = np.maximum(ey2 - dy, 0).astype(np.int32)
+
+        sizes = (dw * dh).astype(np.int64)
+        valid = (sw > 0) & (sh > 0) & (dw > 0) & (dh > 0)
+        sizes[~valid] = 0
+        offsets = np.zeros(N, dtype=np.int64)
+        if N > 0:
+            np.cumsum(sizes[:-1], out=offsets[1:])
+        total_elems = int(offsets[-1] + sizes[-1]) if N > 0 else 0
+        timings["prep_cpu_s"] = time.perf_counter() - t_p0
+
+        self._ensure_roi_bytes(total_elems if total_elems > 0 else 1)
+
+        t_k0 = time.perf_counter()
+        masks_full = np.zeros((N, out_h, out_w), dtype=np.uint8)
+        block = (16, 16, 1)
+        for i, idx in enumerate(indices):
+            if sizes[i] == 0:
+                continue
+            src_offset = int(idx) * n_pix
+            dst_offset = int(offsets[i])
+            grid = ( (int(dw[i]) + block[0]-1)//block[0],
+                     (int(dh[i]) + block[1]-1)//block[1], 1 )
+            self._k_roi(
+                self.dev_ptr[self.name_masks],
+                np.int32(Hm), np.int32(Wm),
+                np.int32(src_offset),
+                np.int32(int(sx[i])), np.int32(int(sy[i])),
+                np.int32(int(sw[i])), np.int32(int(sh[i])),
+                self.dev_rois_u8,
+                np.int32(dst_offset),
+                np.int32(int(dw[i])), np.int32(int(dh[i])),
+                np.float32(thr),
+                block=block, grid=grid, stream=self.stream
+            )
+        self.stream.synchronize()
+        timings["kernel_s"] = time.perf_counter() - t_k0
+
+        t_d0 = time.perf_counter()
+        if total_elems > 0:
+            cuda.memcpy_dtoh_async(self.host_rois_u8[:total_elems], int(self.dev_rois_u8), stream=self.stream)
+        self.stream.synchronize()
+        timings["d2h_s"] = time.perf_counter() - t_d0
+
+        t_paste0 = time.perf_counter()
+        base = self.host_rois_u8
+        for i in range(N):
+            if sizes[i] == 0:
+                continue
+            count = int(sizes[i]); off = int(offsets[i])
+            roi = np.frombuffer(base, dtype=np.uint8, count=count, offset=off).reshape(int(dh[i]), int(dw[i]))
+            masks_full[i, dy[i]:dy[i]+dh[i], dx[i]:dx[i]+dw[i]] = roi
+        timings["paste_cpu_s"] = time.perf_counter() - t_paste0
+
+        timings["total_s"] = time.perf_counter() - t_total0
+        return masks_full, timings
+
+    def cleanup(self):
+        print("Cleaning up TRTSegmentor CUDA resources...")
+
+        cleanup_start_time = time.time()
+        cleanup_timeout = 5.0
+
+        try:
+            try:
+                if hasattr(self, "stream") and self.stream:
+                    print("Synchronizing CUDA stream...")
+                    self.stream.synchronize()
+                    print("CUDA stream synchronized")
+            except Exception as e:
+                print(f"Warning: Could not synchronize CUDA stream: {e}")
+
+            if time.time() - cleanup_start_time > cleanup_timeout:
+                print("Cleanup timeout reached during stream sync - aborting")
+                return
+
+            print("Cleaning up TensorRT engine and CUDA context...")
+
+            if hasattr(self, "context") and self.context:
+                print("Destroying TensorRT execution context...")
+                del self.context
+                self.context = None
+
+            if hasattr(self, "engine") and self.engine:
+                print("Destroying TensorRT engine...")
+                del self.engine
+                self.engine = None
+
+            print("Freeing device memory...")
+            freed_count = 0
+            for name, ptr in list(self.dev_ptr.items()):
+                try:
+                    if ptr:
+                        ptr.free()
+                        freed_count += 1
+                except Exception as e:
+                    print(f"Warning: Error freeing device memory for {name}: {e}")
+
+                if time.time() - cleanup_start_time > cleanup_timeout:
+                    print(f"Cleanup timeout reached - freed {freed_count}/{len(self.dev_ptr)} buffers")
+                    break
+
+            print(f"Freed {freed_count} device memory buffers")
+
+            self.host_buf.clear()
+            self.dev_ptr.clear()
+
+            if hasattr(self, "dev_masks_u8") and self.dev_masks_u8:
+                self.dev_masks_u8.free()
+            if hasattr(self, "dev_rois_u8") and self.dev_rois_u8:
+                self.dev_rois_u8.free()
+
+            print("CUDA resources cleanup attempted")
+
+        except Exception as e:
+            print(f"Warning: Error during CUDA resource cleanup: {e}")
+
+        finally:
+            print("Cleaning up CUDA context stack...")
+            try:
+                if hasattr(self, "ctx") and self.ctx:
+                    context_count = 0
+                    while True:
+                        try:
+                            self.ctx.pop()
+                            context_count += 1
+                            print(f"Popped context #{context_count}")
+                        except Exception:
+                            print(f"No more contexts to pop (popped {context_count} total)")
+                            break
+
+                    try:
+                        self.ctx.detach()
+                        print("CUDA context detached")
+                    except Exception as detach_error:
+                        print(f"Context detach not needed or failed: {detach_error}")
+
+                    print("CUDA context stack cleaned successfully")
+            except Exception as e:
+                print(f"Warning: TensorRT context cleanup error (IGNORED): {e}")
+                print("This TensorRT cleanup warning can be safely ignored")
+
+            try:
+                time.sleep(0.1)
+            except:
+                pass
+
+            print("TensorRT cleanup completed (with warnings ignored)")
+
+class FPSCounter:
+    def __init__(self, window_size=30):
+        self.times = deque(maxlen=window_size)
+        self.last_time = time.perf_counter()
+
+    def update(self):
+        current_time = time.perf_counter()
+        self.times.append(current_time - self.last_time)
+        self.last_time = current_time
+
+    def get_fps(self):
+        if len(self.times) < 2:
+            return 0.0
+        return len(self.times) / sum(self.times)
 
 class VideoInferenceService_baked:
     def __init__(self, websocket_mode=True):
@@ -66,6 +716,12 @@ class VideoInferenceService_baked:
         self.watchdog_thread = None
         self.emergency_stop_event = threading.Event()
         self.csv_data = []
+        
+        self.prev_tray_mask_ref = None
+        self.tray_stable_start_time = None
+        self.current_tray_logged = False
+        self.roi_config = None
+        self.button_list = []
 
     def set_socketio(self, socketio):
         self.socketio = socketio
@@ -77,33 +733,47 @@ class VideoInferenceService_baked:
         self.config = {
             "engine_path": config.get("engine_path", ""),
             "video_path": config.get("video_path", ""),
-            "score_threshold": config.get("score_threshold", 0.4),
-            "score_class0": config.get("score_class0", None),
-            "score_class1": config.get("score_class1", None),
-            "score_class2": config.get("score_class2", None),
-            "score_class3": config.get("score_class3", None),
-            "nms_threshold": config.get("nms_threshold", 0.5),
-            "mask_threshold": config.get("mask_threshold", 0.4),
+            "config_path": config.get("config_path", ""),
+            "button": config.get("button", "[]"),
+            "score_threshold": config.get("score_threshold", 0.7),
+            "mask_threshold": config.get("mask_threshold", 0.7),
             "canvas_size": config.get("canvas_size", 640),
-            "alpha": config.get("alpha", 0.3),
-            "min_inference_frames": config.get("min_inference_frames", 30),
-            "target_fps": config.get("target_fps", 30.0),
-            "mqtt_topic": config.get("mqtt_topic", "detection/results"),
-            "json_output_dir": config.get("json_output_dir", None),
+            "alpha": config.get("alpha", 0.45),
+            "target_fps": config.get("target_fps", TARGET_FPS),
+            "mqtt_topic": config.get("mqtt_topic", "baguette/results"),
             "csv_output_dir": config.get("csv_output_dir", None),
+            "stability_seconds": config.get("stability_seconds", 0.4),
+            "tray_iou_same": config.get("tray_iou_same", 0.6),
+            "gpu_roi": config.get("gpu_roi", True),
+            "engine_binary_masks": config.get("engine_binary_masks", True),
+            "workers": config.get("workers", 4),
         }
 
         if not os.path.exists(self.config["engine_path"]):
             print(f"Engine path does not exist: {self.config['engine_path']}")
             return False
 
+        if not os.path.exists(self.config["config_path"]):
+            print(f"Config path does not exist: {self.config['config_path']}")
+            return False
+
+        try:
+            roi_tuple, mm_per_px, unit = load_config(self.config["config_path"])
+            self.roi_config = {
+                "cx": roi_tuple[0], "cy": roi_tuple[1], "w": roi_tuple[2], "h": roi_tuple[3],
+                "mm_per_px": mm_per_px, "unit": unit
+            }
+            self.button_list = parse_button_array(self.config["button"])
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            return False
+
         return True
 
     def _initialize_engine_in_thread(self):
-        """Initialize the TensorRT engine in the processing thread"""
         try:
             print("Initializing TensorRT engine in processing thread...")
-            self.seg = TRTSegmentor(self.config["engine_path"])
+            self.seg = OptimizedTRTSegmentor(self.config["engine_path"])
             print("TensorRT engine initialized successfully")
             return True
         except Exception as e:
@@ -170,19 +840,17 @@ class VideoInferenceService_baked:
         print("Video processing stopped and service reset")
         return True
 
-    def _add_csv_data(self, tray_number, defected_count, good_count, acceptable_count):
-        """Add tray data to CSV collection with new column structure"""
+    def _add_csv_data(self, tray_number, baguette_number, height_measurement, width_measurement):
         csv_row = {
-            "tray_number": f"Tray {tray_number}",
-            "good": good_count,
-            "acceptable": acceptable_count,
-            "defected": defected_count,
+            'tray_number': tray_number,
+            'baguette_number': baguette_number,
+            'height': height_measurement,
+            'width': width_measurement
         }
         self.csv_data.append(csv_row)
         print(f"Added to CSV: {csv_row}")
 
     def _save_csv_data(self):
-        """Save CSV data to file"""
         if not self.csv_data:
             print("No CSV data to save")
             return False
@@ -193,11 +861,11 @@ class VideoInferenceService_baked:
                 os.makedirs(output_dir)
 
             timestamp_str = time.strftime("%Y%m%d_%H%M%S")
-            csv_filename = f"baguette_analysis_{timestamp_str}.csv"
+            csv_filename = f"baguette_measurements_{timestamp_str}.csv"
             csv_filepath = os.path.join(output_dir, csv_filename)
 
-            with open(csv_filepath, "w", newline="", encoding="utf-8") as csvfile:
-                fieldnames = ["tray_number", "good", "acceptable", "defected"]
+            with open(csv_filepath, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['tray_number', 'baguette_number', 'height', 'width']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(self.csv_data)
@@ -223,11 +891,9 @@ class VideoInferenceService_baked:
             return False
 
     def get_csv_data(self):
-        """Return current CSV data"""
         return {"data": self.csv_data, "row_count": len(self.csv_data)}
 
     def emergency_shutdown(self):
-        """Emergency stop with CSV saving"""
         print("Emergency shutdown initiated")
 
         self.is_running = False
@@ -253,7 +919,6 @@ class VideoInferenceService_baked:
         return True
 
     def _watchdog_monitor(self):
-        """Watchdog monitor for detecting system freezes"""
         print("Watchdog monitor started")
 
         while self.is_running and not self.emergency_stop_event.is_set():
@@ -262,9 +927,7 @@ class VideoInferenceService_baked:
                 time_since_activity = current_time - self.last_activity_time
 
                 if time_since_activity > self.processing_timeout:
-                    print(
-                        f"MAJOR FREEZE DETECTED - EMERGENCY SHUTDOWN after {time_since_activity:.1f}s!"
-                    )
+                    print(f"MAJOR FREEZE DETECTED - EMERGENCY SHUTDOWN after {time_since_activity:.1f}s!")
                     self.emergency_shutdown()
                     break
 
@@ -277,7 +940,6 @@ class VideoInferenceService_baked:
         print("Watchdog monitor stopped")
 
     def reset_to_initial_state(self):
-        """Reset the service back to initial state"""
         print("Resetting VideoInferenceService to initial state...")
 
         try:
@@ -296,6 +958,10 @@ class VideoInferenceService_baked:
         self.inference_active = False
         self.initialization_error = None
         self.last_activity_time = time.time()
+        
+        self.prev_tray_mask_ref = None
+        self.tray_stable_start_time = None
+        self.current_tray_logged = False
 
         self.shutdown_event.clear()
         self.force_stop_event.clear()
@@ -310,7 +976,6 @@ class VideoInferenceService_baked:
         print("Service reset to initial state completed")
 
     def force_stop(self):
-        """Emergency stop function"""
         print("EMERGENCY STOP: Force stopping video processing...")
         self.is_running = False
         self.shutdown_event.set()
@@ -328,28 +993,12 @@ class VideoInferenceService_baked:
         return True
 
     def force_cleanup(self):
-        """Force cleanup of resources"""
         self.reset_to_initial_state()
 
     def is_stuck(self):
-        """Check if processing appears to be stuck"""
         return (time.time() - self.last_activity_time) > self.processing_timeout
 
-    def is_inference_timestamp(self, timestamp):
-        """Check if timestamp matches the pattern: 2.2, 5.2, 8.2, etc."""
-        target_timestamps = []
-        t = 2.2
-        while t <= timestamp + 1.0:
-            target_timestamps.append(t)
-            t += 3.0
-
-        for target in target_timestamps:
-            if abs(timestamp - target) <= 0.1:
-                return target
-        return None
-
     def _process_video(self):
-        """Main video processing loop - runs in separate thread"""
         print("Starting video processing thread...")
 
         if not self._initialize_engine_in_thread():
@@ -365,24 +1014,27 @@ class VideoInferenceService_baked:
 
         try:
             fps = self.cap.get(cv2.CAP_PROP_FPS)
-            frame_idx = 0
-            fps_counter = FPSCounter()
+            frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            inference_active = False
-            inference_frame_count = 0
-            last_inference_timestamp = -1
-            min_inference_frames = self.config["min_inference_frames"]
+            do_height = 'height' in self.button_list
+            do_width = 'width' in self.button_list
+
+            fps_counter = FPSCounter()
+            frame_idx = 0
+            frame_interval = 1.0 / max(1e-6, self.config["target_fps"])
 
             print("Video processing loop started")
-            print("Inference runs at 2.2s, 5.2s, 8.2s... (increment by 3)")
 
             while self.is_running and not self.force_stop_event.is_set():
                 try:
+                    frame_t0 = time.perf_counter()
                     self.last_activity_time = time.time()
 
                     ret, frame = self.cap.read()
                     if not ret:
-                        print("End of video reached")
+                        print("End of video reached - initiating proper shutdown")
                         self._save_csv_data()
                         if self.socketio:
                             self.socketio.emit(
@@ -390,85 +1042,25 @@ class VideoInferenceService_baked:
                                 {"reason": "end_of_video"},
                                 namespace="/ws",
                             )
+                        self.is_running = False
+                        self.shutdown_event.set()
                         break
 
-                    current_timestamp = frame_idx / fps if fps > 0 else 0
+                    current_video_time_ms = self.cap.get(cv2.CAP_PROP_POS_MSEC)
+                    current_video_time_seconds = current_video_time_ms / 1000.0
 
-                    target_timestamp = self.is_inference_timestamp(current_timestamp)
-                    should_start_inference = (
-                        target_timestamp is not None
-                        and target_timestamp != last_inference_timestamp
-                        and not inference_active
+                    vis = self._process_frame(
+                        frame, current_video_time_seconds, width, height,
+                        do_height, do_width, frame_idx, frame_count
                     )
-
-                    if should_start_inference:
-                        inference_active = True
-                        inference_frame_count = 0
-                        last_inference_timestamp = target_timestamp
-                        self.tray_counter += 1
-                        print(
-                            f"Starting inference for Tray {self.tray_counter} at timestamp {current_timestamp:.1f}s"
-                        )
-
-                    if inference_active:
-                        inference_frame_count += 1
-                        if inference_frame_count >= min_inference_frames:
-                            inference_active = False
-                            print(
-                                f"Completed inference period ({inference_frame_count} frames)"
-                            )
-
-                    if inference_active:
-                        vis, detection_count = self._process_inference_frame(
-                            frame, inference_frame_count, current_timestamp
-                        )
-                    else:
-                        vis = frame.copy()
-                        detection_count = 0
-
-                        next_target = 2.2
-                        while next_target <= current_timestamp:
-                            next_target += 3.0
-
-                        cv2.putText(
-                            vis,
-                            f"INFERENCE OFF (Timestamp: {current_timestamp:.1f}s)",
-                            (10, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6,
-                            (0, 0, 255),
-                            2,
-                        )
-                        cv2.putText(
-                            vis,
-                            f"Next inference: {next_target:.1f}s",
-                            (10, 90),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6,
-                            (255, 255, 0),
-                            2,
-                        )
 
                     fps_counter.update()
                     self.current_fps = fps_counter.get_fps()
-                    self.inference_active = inference_active
-
-                    # self._add_fps_overlay(vis)
-                    cv2.putText(
-                        vis,
-                        f"Frame: {frame_idx} | Time: {current_timestamp:.1f}s",
-                        (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (255, 255, 255),
-                        2,
-                    )
 
                     self._emit_frame(
                         vis,
                         {
-                            "timestamp": current_timestamp,
-                            "inference_active": inference_active,
+                            "timestamp": current_video_time_seconds,
                             "fps": self.current_fps,
                             "frame_idx": frame_idx,
                             "tray_number": self.tray_counter,
@@ -476,6 +1068,14 @@ class VideoInferenceService_baked:
                     )
 
                     frame_idx += 1
+
+                    sleep_t = frame_interval - (time.perf_counter() - frame_t0)
+                    if sleep_t > 0:
+                        time.sleep(sleep_t)
+
+                    if frame_idx % 100 == 0:
+                        import gc
+                        gc.collect()
 
                     if self.shutdown_event.is_set() or self.force_stop_event.is_set():
                         print("Shutdown event received")
@@ -489,7 +1089,6 @@ class VideoInferenceService_baked:
         except Exception as e:
             print(f"Critical error in video processing loop: {e}")
             import traceback
-
             traceback.print_exc()
 
             if self.socketio:
@@ -507,524 +1106,171 @@ class VideoInferenceService_baked:
 
             if self.seg:
                 try:
-                    print("Cleaning up TensorRT engine and CUDA context...")
-
-                    if hasattr(self.seg, "context") and self.seg.context:
-                        print("Destroying TensorRT execution context...")
-                        del self.seg.context
-                        self.seg.context = None
-
-                    if hasattr(self.seg, "engine") and self.seg.engine:
-                        print("Destroying TensorRT engine...")
-                        del self.seg.engine
-                        self.seg.engine = None
-
-                    if hasattr(self.seg, "ctx") and self.seg.ctx:
-                        print("Cleaning up CUDA context stack...")
-                        context_count = 0
-                        while True:
-                            try:
-                                self.seg.ctx.pop()
-                                context_count += 1
-                                print(f"Popped context #{context_count}")
-                            except Exception:
-                                print(
-                                    f"No more contexts to pop (popped {context_count} total)"
-                                )
-                                break
-
-                        try:
-                            self.seg.ctx.detach()
-                            print("CUDA context detached")
-                        except Exception as detach_error:
-                            print(
-                                f"Context detach not needed or failed: {detach_error}"
-                            )
-
-                        print("CUDA context stack cleaned successfully")
-
+                    self.seg.cleanup()
                 except Exception as e:
-                    print(f"Warning: Error during TensorRT/CUDA cleanup: {e}")
-
+                    print(f"Warning: Error during segmentor cleanup: {e}")
                 finally:
                     self.seg = None
-                    print("TensorRT segmentor cleared")
 
             import gc
-
             gc.collect()
-            print("Forced garbage collection completed")
             print("Processing thread ending naturally (full cleanup completed)")
             self.is_running = False
 
-    def _process_inference_frame(self, frame, inference_frame_count, current_timestamp):
+    def _process_frame(self, frame, current_video_time_seconds, width, height, 
+                      do_height, do_width, frame_idx, frame_count):
         try:
-            lb, scale, left, top = letterbox(
-                frame, size=self.config["canvas_size"], pad_val=114
-            )
+            rx1, ry1, rx2, ry2 = clamp_roi(self.roi_config["cx"], self.roi_config["cy"], 
+                                          self.roi_config["w"], self.roi_config["h"], width, height)
+            roi = frame[ry1:ry2, rx1:rx2].copy()
+            roi_h_, roi_w_ = roi.shape[:2]
 
-            boxes, labels, scores, _ = self.seg.infer_fast(lb, measure_gpu=False)
+            lb, scale, left, top = letterbox(roi, size=self.config["canvas_size"], pad_val=114)
 
-            keep = np.zeros(len(scores), dtype=bool)
-            for i in range(len(scores)):
-                label_val = int(labels[i])
-                if label_val == 0 and self.config["score_class0"] is not None:
-                    threshold = self.config["score_class0"]
-                elif label_val == 1 and self.config["score_class1"] is not None:
-                    threshold = self.config["score_class1"]
-                elif label_val == 2 and self.config["score_class2"] is not None:
-                    threshold = self.config["score_class2"]
-                elif label_val == 3 and self.config["score_class3"] is not None:
-                    threshold = self.config["score_class3"]
-                else:
-                    threshold = self.config["score_threshold"]
+            boxes, labels, scores, _ = self.seg.infer_optimized(lb)
 
-                keep[i] = scores[i] >= threshold
+            keep = scores >= self.config["score_threshold"]
+            boxes_kept = boxes[keep]
+            labels_kept = labels[keep]
+            keep_idx = np.flatnonzero(keep)
 
-            boxes_filtered = boxes[keep]
-            labels_filtered = labels[keep]
-            scores_filtered = scores[keep]
-
-            if len(boxes_filtered) > 0:
-                boxes_nms, scores_nms, labels_nms = apply_nms(
-                    boxes_filtered,
-                    scores_filtered,
-                    labels_filtered,
-                    nms_threshold=self.config["nms_threshold"],
-                )
-            else:
-                boxes_nms, scores_nms, labels_nms = (
-                    boxes_filtered,
-                    scores_filtered,
-                    labels_filtered,
-                )
-
-            if len(boxes_nms) > 0:
-                keep_idx = []
-                original_indices = np.where(keep)[0]
-
-                for nms_box, nms_score, nms_label in zip(
-                    boxes_nms, scores_nms, labels_nms
-                ):
-                    for j, orig_idx in enumerate(original_indices):
-                        if (
-                            np.allclose(boxes_filtered[j], nms_box, atol=1e-5)
-                            and np.isclose(scores_filtered[j], nms_score, atol=1e-5)
-                            and labels_filtered[j] == nms_label
-                        ):
-                            keep_idx.append(orig_idx)
-                            break
-
-                keep_idx = np.array(keep_idx, dtype=np.int64)
-            else:
-                keep_idx = np.array([], dtype=np.int64)
-
-            boxes_img = unletterbox_boxes(
-                boxes_nms, scale, left, top, frame.shape[1], frame.shape[0]
-            )
-
-            tray_indices = [i for i, lab in enumerate(labels_nms) if int(lab) == 3]
-
-            if len(tray_indices) > 0:
-                tray_bbox = boxes_img[tray_indices[0]]
-                tray_x1, tray_y1, tray_x2, tray_y2 = tray_bbox
-
-                within_tray_mask = []
-                for i, (box, lab) in enumerate(zip(boxes_img, labels_nms)):
-                    if int(lab) == 3:
-                        within_tray_mask.append(True)
-                    else:
-                        bbox_x1, bbox_y1, bbox_x2, bbox_y2 = box
-                        tolerance = 10
-                        within_tray = (
-                            bbox_x1 >= (tray_x1 - tolerance)
-                            and bbox_y1 >= (tray_y1 - tolerance)
-                            and bbox_x2 <= (tray_x2 + tolerance)
-                            and bbox_y2 <= (tray_y2 + tolerance)
-                        )
-                        within_tray_mask.append(within_tray)
-
-                within_tray_mask = np.array(within_tray_mask)
-
-                boxes_img = boxes_img[within_tray_mask]
-                labels_nms = labels_nms[within_tray_mask]
-                keep_idx = keep_idx[within_tray_mask]
+            boxes_roi = unletterbox_boxes(boxes_kept, scale, left, top, roi_w_, roi_h_)
 
             if keep_idx.size > 0:
-                masks_fp, _ = self.seg.copy_masks(keep_idx.astype(np.int64))
-            else:
-                masks_fp = np.empty((0, *self.seg.mask_hw), dtype=self.seg.dtype_masks)
-
-            masks_u8, _ = self._to_u8_fast(masks_fp)
-
-            should_publish = inference_frame_count == 20
-
-            vis, measurement_data = self._measure_and_visualize_baguettes_fast(
-                frame,
-                masks_u8,
-                boxes_img,
-                labels_nms,
-                scale,
-                left,
-                top,
-                should_publish,
-                current_timestamp,
-            )
-
-            if should_publish:
-                class_0_count = measurement_data["defected"]
-                class_1_count = measurement_data["good"]
-                class_2_count = measurement_data["acceptable"]
-
-                self._add_csv_data(
-                    self.tray_counter, class_0_count, class_1_count, class_2_count
-                )
-
-                if self.mqtt_client:
-                    payload = json.dumps(
-                        {
-                            "tray_number": self.tray_counter,
-                            "good": class_1_count,
-                            "acceptable": class_2_count,
-                            "defected": class_0_count,
-                            "total_detected": measurement_data["total_detected"],
-                            "timestamp": current_timestamp,
-                            "processing_time": time.time(),
-                        }
+                if self.config["gpu_roi"] and self.seg.dtype_masks == np.float32:
+                    masks_roi, _ = self.seg.copy_and_resize_masks_roi_gpu(
+                        keep_idx, boxes_roi, scale, left, top, roi_w_, roi_h_, thr=self.config["mask_threshold"]
                     )
-                    self.mqtt_client.publish(self.config["mqtt_topic"], payload)
-
-            cv2.putText(
-                vis,
-                f"INFERENCE ON (Frame {inference_frame_count}/{self.config['min_inference_frames']})",
-                (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2,
-            )
-
-            return vis, len(boxes_img)
-
-        except Exception as e:
-            print(f"Error in inference frame: {e}")
-            return frame.copy(), 0
-
-    def _measure_and_visualize_baguettes_fast(
-        self,
-        base_bgr,
-        masks_lb_u8,
-        boxes_img,
-        labels,
-        scale,
-        left,
-        top,
-        should_publish,
-        current_timestamp,
-    ):
-        """Measurement and visualization for new factory setup with 4 classes and vertical baguettes"""
-        vis = base_bgr.copy()
-        if boxes_img.size == 0:
-            return vis, {"defected": 0, "good": 0, "acceptable": 0, "total_detected": 0}
-
-        H_img, W_img = vis.shape[:2]
-
-        tray_indices = [i for i, lab in enumerate(labels) if int(lab) == 3]
-        tray_bbox = None
-        if tray_indices:
-            tray_bbox = boxes_img[tray_indices[0]]
-
-        baguette_indices = [i for i, lab in enumerate(labels) if int(lab) in [0, 1, 2]]
-
-        objects = []
-        for i in baguette_indices:
-            box = boxes_img[i]
-            lab = labels[i]
-            x1, y1, x2, y2 = box
-            center_x = (x1 + x2) / 2
-            center_y = (y1 + y2) / 2
-            width_px = x2 - x1
-            length_px = y2 - y1
-
-            objects.append(
-                {
-                    "index": i,
-                    "bbox": box,
-                    "label": lab,
-                    "center_x": center_x,
-                    "center_y": center_y,
-                    "top_edge": y1,
-                    "bottom_edge": y2,
-                    "width_px": width_px,
-                    "length_px": length_px,
-                }
-            )
-
-        if should_publish and current_timestamp is not None:
-            print(
-                f"\n[Timestamp {current_timestamp:.1f}s - Frame 20 of inference period] BAGUETTE MEASUREMENT ANALYSIS"
-            )
-            print("=" * 60)
-
-            class_0_count = sum(1 for obj in objects if int(obj["label"]) == 0)
-            class_1_count = sum(1 for obj in objects if int(obj["label"]) == 1)
-            class_2_count = sum(1 for obj in objects if int(obj["label"]) == 2)
-
-            print("BAGUETTE QUALITY SUMMARY:")
-            print(f"   Good baguettes (Class 1):       {class_1_count}")
-            print(f"   Acceptable baguettes (Class 2): {class_2_count}")
-            print(f"   Defected baguettes (Class 0):   {class_0_count}")
-            print(f"   Total detected:                 {len(objects)}")
-            if tray_bbox is not None:
-                print(f"   Tray detected:                  Yes")
-            else:
-                print(f"   Tray detected:                  No")
-
-            if self.config.get("json_output_dir"):
-                self._save_json_data(
-                    objects,
-                    tray_bbox,
-                    self.tray_counter,
-                    current_timestamp,
-                    self.config["json_output_dir"],
-                )
-
-        if tray_bbox is not None:
-            x1, y1, x2, y2 = [int(v) for v in tray_bbox]
-            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 3)
-
-        if tray_bbox is not None and len(objects) > 0:
-            tray_y_center = (tray_bbox[1] + tray_bbox[3]) / 2
-            row1_objects = [obj for obj in objects if obj["center_y"] < tray_y_center]
-            row2_objects = [obj for obj in objects if obj["center_y"] >= tray_y_center]
-
-            row1_objects.sort(key=lambda obj: obj["center_x"])
-            row2_objects.sort(key=lambda obj: obj["center_x"])
-
-            if should_publish:
-                print(f"Row 1 (Top): {len(row1_objects)} baguettes")
-                print(f"Row 2 (Bottom): {len(row2_objects)} baguettes")
-        else:
-            row1_objects = sorted(objects, key=lambda obj: obj["center_x"])
-            row2_objects = []
-
-        for obj in objects:
-            i = obj["index"]
-            box = obj["bbox"]
-            lab = obj["label"]
-            center_x, center_y = obj["center_x"], obj["center_y"]
-            width_px, length_px = obj["width_px"], obj["length_px"]
-
-            if int(lab) == 3:
-                continue
-
-            if i < len(masks_lb_u8):
-                m = masks_lb_u8[i]
-                x_lb, y_lb, w_lb, h_lb = cv2.boundingRect(m)
-                if w_lb <= 0 or h_lb <= 0:
-                    continue
-
-                x1 = int(np.clip(round((x_lb - left) / scale), 0, W_img - 1))
-                y1 = int(np.clip(round((y_lb - top) / scale), 0, H_img - 1))
-                x2 = int(np.clip(round(((x_lb + w_lb) - left) / scale), 0, W_img))
-                y2 = int(np.clip(round(((y_lb + h_lb) - top) / scale), 0, H_img))
-                pw, ph = max(0, x2 - x1), max(0, y2 - y1)
-                if pw == 0 or ph == 0:
-                    continue
-
-                patch = m[y_lb : y_lb + h_lb, x_lb : x_lb + w_lb]
-                mroi = cv2.resize(patch, (pw, ph), interpolation=cv2.INTER_NEAREST)
-                roi = vis[y1 : y1 + ph, x1 : x1 + pw]
-
-                label_val = int(lab)
-
-                if label_val == 0:
-                    mask_color = (0, 0, 255)
-                elif label_val == 1:
-                    mask_color = (0, 255, 0)
-                elif label_val == 2:
-                    mask_color = (0, 255, 255)
                 else:
-                    mask_color = (128, 128, 128)
-
-                color_roi = np.empty_like(roi)
-                color_roi[:] = mask_color
-                blended = cv2.addWeighted(
-                    roi,
-                    1.0 - self.config["alpha"],
-                    color_roi,
-                    self.config["alpha"],
-                    0.0,
-                )
-                cv2.copyTo(blended, mroi, roi)
-
-            x1b, y1b, x2b, y2b = [int(v) for v in box]
-            center_x_int, center_y_int = int(center_x), int(center_y)
-
-            cv2.line(vis, (center_x_int, y1b), (center_x_int, y2b), (255, 0, 0), 1)
-            cv2.line(vis, (x1b, center_y_int), (x2b, center_y_int), (0, 0, 0), 1)
-
-        if should_publish:
-            for row_num, row_objects in enumerate([row1_objects, row2_objects], 1):
-                if not row_objects:
-                    continue
-
-                print(f"\nROW {row_num} MEASUREMENTS")
-                print("-" * 40)
-
-                for obj_num, obj in enumerate(row_objects, 1):
-                    label_val = int(obj["label"])
-                    if label_val == 0:
-                        color_name = "Red (Defected)"
-                    elif label_val == 1:
-                        color_name = "Green (Good)"
-                    elif label_val == 2:
-                        color_name = "Yellow (Acceptable)"
+                    masks_fp, _ = self.seg.copy_masks_optimized(keep_idx, thr=self.config["mask_threshold"])
+                    if self.config["engine_binary_masks"]:
+                        masks_u8 = masks_fp.astype(np.uint8, copy=False)
                     else:
-                        color_name = "Other"
-
-                    print(
-                        f"Baguette {obj_num:2d} ({color_name}): Length={obj['width_px']:6.1f}px, Width={obj['length_px']:6.1f}px"
+                        masks_u8 = ((masks_fp > self.config["mask_threshold"]) * 255).astype(np.uint8) if masks_fp.size > 0 else masks_fp.astype(np.uint8)
+                    masks_roi, _, _ = unletterbox_masks_roi(
+                        masks_u8, boxes_roi, scale, left, top, roi_w_, roi_h_, max_workers=self.config["workers"]
                     )
-
-            print("\n" + "=" * 60)
-            print("FINAL SUMMARY:")
-            total_baguettes = len(objects)
-            class_0_count = sum(1 for obj in objects if int(obj["label"]) == 0)
-            class_1_count = sum(1 for obj in objects if int(obj["label"]) == 1)
-            class_2_count = sum(1 for obj in objects if int(obj["label"]) == 2)
-
-            if total_baguettes > 0:
-                good_rate = (class_1_count / total_baguettes) * 100
-                acceptable_rate = (class_2_count / total_baguettes) * 100
-                defect_rate = (class_0_count / total_baguettes) * 100
-                print(
-                    f"   Good Rate:       {good_rate:.1f}% ({class_1_count}/{total_baguettes})"
-                )
-                print(
-                    f"   Acceptable Rate: {acceptable_rate:.1f}% ({class_2_count}/{total_baguettes})"
-                )
-                print(
-                    f"   Defect Rate:     {defect_rate:.1f}% ({class_0_count}/{total_baguettes})"
-                )
+                    del masks_fp, masks_u8
             else:
-                print("   No baguettes detected")
-            print("=" * 60)
+                masks_roi = np.empty((0, roi_h_, roi_w_), dtype=np.uint8)
 
-        measurement_data = {
-            "defected": sum(1 for obj in objects if int(obj["label"]) == 0),
-            "good": sum(1 for obj in objects if int(obj["label"]) == 1),
-            "acceptable": sum(1 for obj in objects if int(obj["label"]) == 2),
-            "total_detected": len(objects),
-        }
+            baguette_items = []
+            tray_masks = []
+            for m, lab, bx in zip(masks_roi, labels_kept, boxes_roi):
+                if lab == 0:
+                    baguette_items.append({"mask": m, "bbox": bx})
+                elif lab == 1:
+                    tray_masks.append(m)
 
-        return vis, measurement_data
+            chosen_tray_idx = pick_complete_tray(tray_masks)
+            tray_mask = tray_masks[chosen_tray_idx] if chosen_tray_idx != -1 else None
 
-    def _save_json_data(
-        self, objects, tray_bbox, tray_number, timestamp, json_output_dir
-    ):
-        """Save detailed baguette measurement data to JSON file"""
-        if not os.path.exists(json_output_dir):
-            os.makedirs(json_output_dir)
+            filtered_baguettes = []
+            if tray_mask is not None:
+                tray_bin = (tray_mask > 0).astype(np.uint8)
+                for item in baguette_items:
+                    bm = item["mask"]
+                    if bm is None or bm.size == 0:
+                        continue
+                    b_bin = (bm > 0).astype(np.uint8)
+                    inter = cv2.bitwise_and(b_bin, tray_bin)
+                    b_area = int(b_bin.sum())
+                    if b_area > 0 and int(inter.sum()) >= 0.5 * b_area:
+                        filtered_baguettes.append({"mask": (b_bin * 255).astype(np.uint8),
+                                                   "bbox": item["bbox"]})
 
-        class_0_count = sum(1 for obj in objects if int(obj["label"]) == 0)
-        class_1_count = sum(1 for obj in objects if int(obj["label"]) == 1)
-        class_2_count = sum(1 for obj in objects if int(obj["label"]) == 2)
+            now = time.perf_counter()
+            measurement_draw_enabled = False
+            if tray_mask is not None:
+                if self.prev_tray_mask_ref is None:
+                    self.prev_tray_mask_ref = tray_mask.copy()
+                    self.tray_stable_start_time = now
+                    self.current_tray_logged = False
+                else:
+                    iou = mask_iou(tray_mask, self.prev_tray_mask_ref)
+                    if iou >= self.config["tray_iou_same"]:
+                        if self.tray_stable_start_time is None:
+                            self.tray_stable_start_time = now
+                        duration = now - self.tray_stable_start_time
+                        measurement_draw_enabled = True
+                        if (not self.current_tray_logged) and duration >= self.config["stability_seconds"]:
+                            self.tray_counter += 1
+                            count = len(filtered_baguettes)
+                            print(f"\nTray {self.tray_counter} baguettes: {count}")
+                            if count > 0 and (do_height or do_width):
+                                ordered = order_baguettes_row_major(filtered_baguettes)
+                                for idx, itm in enumerate(ordered, start=1):
+                                    x1,y1,x2,y2 = itm["bbox"]
+                                    h_px = int(round((y2 - y1)))
+                                    w_px = int(round((x2 - x1)))
+                                    
+                                    height_str = fmt_measurement(h_px, self.roi_config["mm_per_px"], self.roi_config["unit"]) if do_height else None
+                                    width_str = fmt_measurement(w_px, self.roi_config["mm_per_px"], self.roi_config["unit"]) if do_width else None
+                                    
+                                    parts = []
+                                    if height_str: parts.append(f"height={height_str}")
+                                    if width_str: parts.append(f"width={width_str}")
+                                    if parts:
+                                        print(f"b{idx}: " + " ".join(parts))
+                                    
+                                    self._add_csv_data(self.tray_counter, idx, height_str, width_str)
+                                    
+                                    if self.mqtt_client:
+                                        mqtt_payload = {
+                                            'tray_number': self.tray_counter,
+                                            'baguette_number': idx,
+                                            'height': height_str,
+                                            'width': width_str,
+                                            'timestamp': time.time()
+                                        }
+                                        payload_json = json.dumps(mqtt_payload)
+                                        self.mqtt_client.publish(self.config["mqtt_topic"], payload_json)
+                            
+                            self.current_tray_logged = True
+                        self.prev_tray_mask_ref = tray_mask.copy()
+                    else:
+                        self.prev_tray_mask_ref = tray_mask.copy()
+                        self.tray_stable_start_time = now
+                        self.current_tray_logged = False
+            else:
+                self.prev_tray_mask_ref = None
+                self.tray_stable_start_time = None
+                self.current_tray_logged = False
 
-        if tray_bbox is not None:
-            tray_y_center = (tray_bbox[1] + tray_bbox[3]) / 2
-            row1_objects = [obj for obj in objects if obj["center_y"] < tray_y_center]
-            row2_objects = [obj for obj in objects if obj["center_y"] >= tray_y_center]
+            vis = frame.copy()
+            vis = visualize_baguettes_and_tray(
+                vis, (rx1, ry1, rx2, ry2),
+                [itm["mask"] for itm in filtered_baguettes],
+                tray_mask if tray_mask is not None else None,
+                alpha=self.config["alpha"]
+            )
+            
+            if measurement_draw_enabled and (do_height or do_width) and tray_mask is not None:
+                vis = draw_measurement_lines(
+                    vis, (rx1, ry1, rx2, ry2),
+                    filtered_baguettes,
+                    draw_height=do_height,
+                    draw_width=do_width
+                )
 
-            row1_objects.sort(key=lambda obj: obj["center_x"])
-            row2_objects.sort(key=lambda obj: obj["center_x"])
-        else:
-            row1_objects = objects
-            row2_objects = []
+            del lb, roi, masks_roi
+            if 'filtered_baguettes' in locals():
+                del filtered_baguettes
+            if 'tray_masks' in locals():
+                del tray_masks
+            
+            return vis
 
-        json_data = {
-            "tray_number": f"Tray {tray_number}",
-            "timestamp": f"{timestamp:.1f}s",
-            "good": int(class_1_count),
-            "acceptable": int(class_2_count),
-            "defected": int(class_0_count),
-            "total_detected": int(len(objects)),
-            "row1_baguettes": len(row1_objects),
-            "row2_baguettes": len(row2_objects),
-            "baguettes": [],
-        }
-
-        all_sorted_objects = []
-
-        for i, obj in enumerate(row1_objects):
-            all_sorted_objects.append((f"row1_baguette_{i+1}", obj))
-
-        for i, obj in enumerate(row2_objects):
-            all_sorted_objects.append((f"row2_baguette_{i+1}", obj))
-
-        for baguette_id, obj in all_sorted_objects:
-            baguette_data = {
-                baguette_id: {
-                    "width": round(float(obj["length_px"]), 1),
-                    "length": round(float(obj["width_px"]), 1),
-                    "class": int(obj["label"]),
-                    "classification": (
-                        "defected"
-                        if int(obj["label"]) == 0
-                        else "good" if int(obj["label"]) == 1 else "acceptable"
-                    ),
-                    "position": {
-                        "top_edge": round(float(obj["top_edge"]), 1),
-                        "bottom_edge": round(float(obj["bottom_edge"]), 1),
-                        "center_x": round(float(obj["center_x"]), 1),
-                        "center_y": round(float(obj["center_y"]), 1),
-                    },
-                }
-            }
-            json_data["baguettes"].append(baguette_data)
-
-        filename = f"tray_{tray_number:03d}_timestamp_{timestamp:.1f}s.json"
-        filepath = os.path.join(json_output_dir, filename)
-
-        try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(json_data, f, indent=2, ensure_ascii=False)
-            print(f"JSON data saved: {filepath}")
-            return True
         except Exception as e:
-            print(f"Error saving JSON: {e}")
-            return False
-
-    def _add_fps_overlay(self, vis):
-        height, width = vis.shape[:2]
-        fps_text = f"FPS: {self.current_fps:.1f}"
-        text_size = cv2.getTextSize(fps_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
-        cv2.rectangle(
-            vis,
-            (width - text_size[0] - 20, 70),
-            (width - 5, text_size[1] + 85),
-            (0, 0, 0),
-            -1,
-        )
-        cv2.putText(
-            vis,
-            fps_text,
-            (width - text_size[0] - 15, text_size[1] + 80),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 255, 0),
-            2,
-        )
+            print(f"Error in frame processing: {e}")
+            return frame
 
     def _emit_frame(self, frame, metadata):
         if not self.socketio or not self.websocket_mode:
             return
 
         current_time = time.time()
-        if (
-            current_time - self.last_websocket_frame_time
-            < self.websocket_frame_interval
-        ):
+        if (current_time - self.last_websocket_frame_time < self.websocket_frame_interval):
             return
 
         self.last_websocket_frame_time = current_time
@@ -1036,463 +1282,14 @@ class VideoInferenceService_baked:
 
         self.socketio.emit("stream_frame", data, namespace="/ws")
 
-    def _to_u8_fast(self, m):
-        if m.size == 0:
-            return m.astype(np.uint8), False
-        if self.config.get("engine_binary_masks", True):
-            return m.astype(np.uint8, copy=False), False
-        flat = m.ravel()
-        sample = flat[:: max(1, flat.size // 2048)]
-        if sample.max() <= 1.05:
-            out = (m > self.config["mask_threshold"]).astype(np.uint8) * 255
-            return out, True
-        if np.all((sample == 0) | (np.abs(sample - 255.0) < 0.5)):
-            return m.astype(np.uint8, copy=False), False
-        out = (m > self.config["mask_threshold"]).astype(np.uint8) * 255
-        return out, True
-
     def get_status(self):
         return {
             "is_running": self.is_running,
             "current_fps": self.current_fps,
             "tray_count": self.tray_counter,
-            "inference_active": self.inference_active,
             "config": self.config,
             "initialization_error": self.initialization_error,
             "is_stuck": self.is_stuck(),
             "last_activity": time.time() - self.last_activity_time,
         }
 
-
-class FPSCounter:
-    def __init__(self, window_size=30):
-        self.times = deque(maxlen=window_size)
-        self.last_time = time.perf_counter()
-
-    def update(self):
-        current_time = time.perf_counter()
-        self.times.append(current_time - self.last_time)
-        self.last_time = current_time
-
-    def get_fps(self):
-        if len(self.times) < 2:
-            return 0.0
-        return len(self.times) / sum(self.times)
-
-
-def letterbox(img, size=640, pad_val=114):
-    h, w = img.shape[:2]
-    scale = min(size / h, size / w)
-    new_w, new_h = int(round(w * scale)), int(round(h * scale))
-    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    canvas = np.full((size, size, 3), pad_val, dtype=np.uint8)
-    top, left = (size - new_h) // 2, (size - new_w) // 2
-    canvas[top : top + new_h, left : left + new_w] = resized
-    return canvas, scale, left, top
-
-
-def unletterbox_boxes(boxes_xyxy, scale, left, top, out_w, out_h):
-    if boxes_xyxy.size == 0:
-        return boxes_xyxy
-    out = boxes_xyxy.astype(np.float32, copy=False).copy()
-    out[:, [0, 2]] = np.clip((out[:, [0, 2]] - left) / scale, 0, out_w - 1)
-    out[:, [1, 3]] = np.clip((out[:, [1, 3]] - top) / scale, 0, out_h - 1)
-    return out
-
-
-class TRTSegmentor:
-    def __init__(self, engine_path, verbose=False):
-        print(f"Initializing TRTSegmentor with engine: {engine_path}")
-
-        cuda.init()
-        self.device = cuda.Device(0)
-        self.ctx = self.device.make_context()
-        self.ctx.push()
-
-        try:
-            self.trt10 = int(trt.__version__.split(".")[0]) >= 10
-            logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.ERROR)
-
-            t0 = time.perf_counter()
-            with open(engine_path, "rb") as f:
-                runtime = trt.Runtime(logger)
-                self.engine = runtime.deserialize_cuda_engine(f.read())
-            self.context = self.engine.create_execution_context()
-            t1 = time.perf_counter()
-            self.model_load_s = t1 - t0
-
-            names = (
-                [
-                    self.engine.get_tensor_name(i)
-                    for i in range(self.engine.num_io_tensors)
-                ]
-                if self.trt10
-                else [
-                    self.engine.get_binding_name(i)
-                    for i in range(self.engine.num_bindings)
-                ]
-            )
-
-            def has(n):
-                return any(n == x for x in names)
-
-            def find(sub):
-                for n in names:
-                    if sub in n:
-                        return n
-                return None
-
-            self.name_in = "raw_input" if has("raw_input") else find("raw_input")
-            self.name_dets = "dets" if has("dets") else find("dets")
-            self.name_labels = "labels" if has("labels") else find("label")
-            self.name_masks = "masks" if has("masks") else find("mask")
-
-            if any(
-                x is None
-                for x in [
-                    self.name_in,
-                    self.name_dets,
-                    self.name_labels,
-                    self.name_masks,
-                ]
-            ):
-                raise RuntimeError(f"Could not find expected tensors. Found: {names}")
-
-            def nptype_of(name):
-                if self.trt10:
-                    return trt.nptype(self.engine.get_tensor_dtype(name))
-                else:
-                    idx = self.engine.get_binding_index(name)
-                    return trt.nptype(self.engine.get_binding_dtype(idx))
-
-            self.dtype_in = nptype_of(self.name_in)
-            self.dtype_dets = nptype_of(self.name_dets)
-            self.dtype_labels = nptype_of(self.name_labels)
-            self.dtype_masks = nptype_of(self.name_masks)
-
-            def eng_shape(name):
-                return (
-                    tuple(self.engine.get_tensor_shape(name))
-                    if self.trt10
-                    else tuple(
-                        self.engine.get_binding_shape(
-                            self.engine.get_binding_index(name)
-                        )
-                    )
-                )
-
-            def ctx_shape(name):
-                return (
-                    tuple(self.context.get_tensor_shape(name))
-                    if self.trt10
-                    else tuple(
-                        self.context.get_binding_shape(
-                            self.engine.get_binding_index(name)
-                        )
-                    )
-                )
-
-            shp_in_engine = eng_shape(self.name_in)
-
-            if self.trt10:
-                shp_in_rt = shp_in_engine
-                if -1 in shp_in_rt:
-                    H, W = (
-                        (shp_in_rt[-3], shp_in_rt[-2])
-                        if shp_in_rt[-1] == 3
-                        else (shp_in_rt[-2], shp_in_rt[-1])
-                    )
-                    shp_in_rt = (
-                        1,
-                        H if H > 0 else DEFAULT_CANVAS,
-                        W if W > 0 else DEFAULT_CANVAS,
-                        3,
-                    )
-                    self.context.set_input_shape(self.name_in, shp_in_rt)
-            else:
-                b = self.engine.get_binding_index(self.name_in)
-                shp_in_rt = shp_in_engine
-                if -1 in shp_in_engine:
-                    if self.engine.num_optimization_profiles > 0:
-                        self.context.active_optimization_profile = 0
-                    H, W = (
-                        (shp_in_engine[-3], shp_in_engine[-2])
-                        if shp_in_engine[-1] == 3
-                        else (shp_in_engine[-2], shp_in_engine[-1])
-                    )
-                    shp_in_rt = (
-                        1,
-                        H if H > 0 else DEFAULT_CANVAS,
-                        W if W > 0 else DEFAULT_CANVAS,
-                        3,
-                    )
-                    self.context.set_binding_shape(b, shp_in_rt)
-
-            shp_in_rt_now = ctx_shape(self.name_in)
-            shp_dets_ctx = ctx_shape(self.name_dets)
-            shp_dets_eng = eng_shape(self.name_dets)
-            shp_labels_ctx = ctx_shape(self.name_labels)
-            shp_labels_eng = eng_shape(self.name_labels)
-            shp_masks_ctx = ctx_shape(self.name_masks)
-            shp_masks_eng = eng_shape(self.name_masks)
-
-            def finalize(ctx_shp, eng_shp, kind):
-                def ok(s):
-                    return s and all((d is not None and d > 0) for d in s)
-
-                if ok(ctx_shp):
-                    return tuple(ctx_shp)
-                if ok(eng_shp):
-                    return tuple(eng_shp)
-                if kind == "in":
-                    H = eng_shp[-3] if eng_shp and eng_shp[-3] > 0 else DEFAULT_CANVAS
-                    W = eng_shp[-2] if eng_shp and eng_shp[-2] > 0 else DEFAULT_CANVAS
-                    return (1, H, W, 3)
-                if kind == "dets":
-                    N = (
-                        eng_shp[1]
-                        if eng_shp and len(eng_shp) > 1 and eng_shp[1] > 0
-                        else DEFAULT_TOPK
-                    )
-                    return (1, N, 5)
-                if kind == "labels":
-                    N = (
-                        shp_dets_eng[1]
-                        if shp_dets_eng
-                        and len(shp_dets_eng) > 1
-                        and shp_dets_eng[1] > 0
-                        else DEFAULT_TOPK
-                    )
-                    return (1, N)
-                if kind == "masks":
-                    N = (
-                        shp_dets_eng[1]
-                        if shp_dets_eng
-                        and len(shp_dets_eng) > 1
-                        and shp_dets_eng[1] > 0
-                        else DEFAULT_TOPK
-                    )
-                    Hm = (
-                        shp_in_rt_now[-3]
-                        if shp_in_rt_now and len(shp_in_rt_now) == 4
-                        else DEFAULT_CANVAS
-                    )
-                    Wm = (
-                        shp_in_rt_now[-2]
-                        if shp_in_rt_now and len(shp_in_rt_now) == 4
-                        else DEFAULT_CANVAS
-                    )
-                    return (1, N, Hm, Wm)
-                raise ValueError(kind)
-
-            shp_in_final = finalize(shp_in_rt_now, shp_in_engine, "in")
-            shp_dets_final = finalize(shp_dets_ctx, shp_dets_eng, "dets")
-            shp_labels_final = finalize(shp_labels_ctx, shp_labels_eng, "labels")
-            shp_masks_final = finalize(shp_masks_ctx, shp_masks_eng, "masks")
-
-            self.max_det = shp_dets_final[1]
-            self.mask_hw = shp_masks_final[-2:]
-
-            self.dev_ptr, self.host_buf, self.pinned_flag = {}, {}, {}
-
-            def allocate_host(name, shape, dtype, force_pinned=False):
-                numel = int(np.prod(shape))
-                nbytes = numel * np.dtype(dtype).itemsize
-                use_pinned = force_pinned or (nbytes >= PINNED_THRESHOLD_BYTES)
-                buf = (
-                    cuda.pagelocked_empty(numel, dtype)
-                    if use_pinned
-                    else np.empty(numel, dtype=dtype)
-                )
-                self.host_buf[name] = buf
-                self.pinned_flag[name] = use_pinned
-                self.dev_ptr[name] = cuda.mem_alloc(nbytes)
-
-            def allocate_dev_only(name, shape, dtype):
-                numel = int(np.prod(shape))
-                nbytes = numel * np.dtype(dtype).itemsize
-                self.dev_ptr[name] = cuda.mem_alloc(nbytes)
-
-            allocate_host(self.name_in, shp_in_final, self.dtype_in)
-            allocate_host(
-                self.name_dets, shp_dets_final, self.dtype_dets, force_pinned=True
-            )
-            allocate_host(
-                self.name_labels, shp_labels_final, self.dtype_labels, force_pinned=True
-            )
-            allocate_dev_only(self.name_masks, shp_masks_final, self.dtype_masks)
-
-            self.stream = cuda.Stream()
-            self.start_evt = cuda.Event()
-            self.end_evt = cuda.Event()
-
-            self.output_boxes = np.empty((self.max_det, 4), dtype=np.float32)
-            self.output_labels = np.empty(self.max_det, dtype=np.int32)
-            self.output_scores = np.empty(self.max_det, dtype=np.float32)
-
-            self.mask_host_capacity = 0
-            self.mask_host_buf = None
-
-            if self.trt10:
-                for n, d in self.dev_ptr.items():
-                    self.context.set_tensor_address(n, int(d))
-            else:
-                self.bindings_order = [None] * self.engine.num_bindings
-                for i in range(self.engine.num_bindings):
-                    n = self.engine.get_binding_name(i)
-                    self.bindings_order[i] = int(self.dev_ptr[n])
-
-            print("TRTSegmentor initialization complete")
-
-        finally:
-            pass
-
-    def infer_fast(self, lb_img_uint8, measure_gpu=False):
-        np.copyto(self.host_buf[self.name_in], lb_img_uint8.ravel())
-        if self.pinned_flag[self.name_in]:
-            cuda.memcpy_htod_async(
-                self.dev_ptr[self.name_in], self.host_buf[self.name_in], self.stream
-            )
-        else:
-            cuda.memcpy_htod(self.dev_ptr[self.name_in], self.host_buf[self.name_in])
-
-        if measure_gpu:
-            self.stream.synchronize()
-            self.start_evt.record(self.stream)
-
-        if self.trt10:
-            self.context.execute_async_v3(self.stream.handle)
-        else:
-            self.context.execute_async_v2(self.bindings_order, self.stream.handle)
-
-        if measure_gpu:
-            self.end_evt.record(self.stream)
-            self.stream.synchronize()
-            gpu_s = self.start_evt.time_till(self.end_evt) / 1e3
-        else:
-            gpu_s = 0.0
-
-        if not measure_gpu:
-            cuda.memcpy_dtoh_async(
-                self.host_buf[self.name_dets], self.dev_ptr[self.name_dets], self.stream
-            )
-            cuda.memcpy_dtoh_async(
-                self.host_buf[self.name_labels],
-                self.dev_ptr[self.name_labels],
-                self.stream,
-            )
-            self.stream.synchronize()
-        else:
-            cuda.memcpy_dtoh(
-                self.host_buf[self.name_dets], self.dev_ptr[self.name_dets]
-            )
-            cuda.memcpy_dtoh(
-                self.host_buf[self.name_labels], self.dev_ptr[self.name_labels]
-            )
-
-        dets_raw = self.host_buf[self.name_dets].view().reshape(1, self.max_det, 5)[0]
-        labels_raw = self.host_buf[self.name_labels].view().reshape(1, self.max_det)[0]
-        np.copyto(self.output_boxes, dets_raw[:, :4])
-        np.copyto(self.output_scores, dets_raw[:, 4])
-        np.copyto(self.output_labels, labels_raw.astype(np.int32))
-
-        return self.output_boxes, self.output_labels, self.output_scores, gpu_s
-
-    def _ensure_mask_host(self, need_count):
-        Hm, Wm = self.mask_hw
-        if self.mask_host_buf is not None and need_count <= self.mask_host_capacity:
-            return
-        new_cap = max(need_count, max(1, self.mask_host_capacity * 2))
-        self.mask_host_buf = cuda.pagelocked_empty(
-            (new_cap, Hm, Wm), dtype=self.dtype_masks
-        )
-        self.mask_host_capacity = new_cap
-
-    def copy_masks(self, indices):
-        Hm, Wm = self.mask_hw
-        dtype = self.dtype_masks
-        itemsize = np.dtype(dtype).itemsize
-        slice_bytes = Hm * Wm * itemsize
-
-        if len(indices) == 0:
-            return np.empty((0, Hm, Wm), dtype=dtype), 0.0
-
-        self._ensure_mask_host(len(indices))
-        mask_stream = cuda.Stream()
-        t0 = time.perf_counter()
-        base_addr = int(self.dev_ptr[self.name_masks])
-        for k, idx in enumerate(indices):
-            src = base_addr + int(idx) * slice_bytes
-            dst = self.mask_host_buf[k].ravel()
-            cuda.memcpy_dtoh_async(dst, src, mask_stream)
-        mask_stream.synchronize()
-        t1 = time.perf_counter()
-        return np.array(self.mask_host_buf[: len(indices)]), (t1 - t0)
-
-    def cleanup(self):
-        """Clean up all CUDA resources with timeout protection"""
-        print("Cleaning up TRTSegmentor CUDA resources...")
-
-        cleanup_start_time = time.time()
-        cleanup_timeout = 5.0
-
-        try:
-            try:
-                if hasattr(self, "stream") and self.stream:
-                    print("Synchronizing CUDA stream...")
-                    self.stream.synchronize()
-                    print("CUDA stream synchronized")
-            except Exception as e:
-                print(f"Warning: Could not synchronize CUDA stream: {e}")
-
-            if time.time() - cleanup_start_time > cleanup_timeout:
-                print("Cleanup timeout reached during stream sync - aborting")
-                return
-
-            print("Freeing device memory...")
-            freed_count = 0
-            for name, ptr in list(self.dev_ptr.items()):
-                try:
-                    if ptr:
-                        ptr.free()
-                        freed_count += 1
-                except Exception as e:
-                    print(f"Warning: Error freeing device memory for {name}: {e}")
-
-                if time.time() - cleanup_start_time > cleanup_timeout:
-                    print(
-                        f"Cleanup timeout reached - freed {freed_count}/{len(self.dev_ptr)} buffers"
-                    )
-                    break
-
-            print(f"Freed {freed_count} device memory buffers")
-
-            self.host_buf.clear()
-            self.dev_ptr.clear()
-            self.pinned_flag.clear()
-
-            self.mask_host_buf = None
-            self.mask_host_capacity = 0
-
-            print("CUDA resources cleanup attempted")
-
-        except Exception as e:
-            print(f"Warning: Error during CUDA resource cleanup: {e}")
-
-        finally:
-            print("Detaching CUDA context...")
-            try:
-                if hasattr(self, "ctx") and self.ctx:
-                    self.ctx.pop()
-                    self.ctx.detach()
-                    print("CUDA context detached successfully")
-            except Exception as e:
-                print(f"Warning: TensorRT context cleanup error (IGNORED): {e}")
-                print("This TensorRT cleanup warning can be safely ignored")
-
-            try:
-                time.sleep(0.1)
-            except:
-                pass
-
-            print("TensorRT cleanup completed (with warnings ignored)")
