@@ -41,9 +41,8 @@ def get_video_service_bkd():
 @inference_bp.route("/config", methods=["GET"])
 def get_config():
     config = app_config.get_config()
-    return jsonify({
-        "video_mode": config.get("VIDEO_MODE")
-    }), 200
+    return jsonify({"video_mode": config.get("VIDEO_MODE")}), 200
+
 
 @inference_bp.route("/stream/normal", methods=["POST"])
 def start_normal_stream():
@@ -53,7 +52,7 @@ def start_normal_stream():
         measurement_mode = data.get("measurement_mode", [])
         formatted_modes = [m.lower().replace(" ", "_") for m in measurement_mode]
         mode_string = ",".join(formatted_modes)
-        app_config.set_measurement_mode(mode_string) 
+        app_config.set_measurement_mode(mode_string)
 
         print(f"Selected measurements: {mode_string}")
 
@@ -115,6 +114,12 @@ def start_normal_stream():
                         500,
                     )
             elif RUNTIME_CONFIG.get("video_mode") == "baked_baguette":
+                RUNTIME_CONFIG["config_path"] = os.path.join(
+                    os.path.dirname(__file__), "m.json"
+                )
+                RUNTIME_CONFIG["button"] = app_config.get_measurement_mode()
+                RUNTIME_CONFIG["score_threshold"] = 0.7
+                RUNTIME_CONFIG["mask_threshold"]= 0.7
 
                 video_service = get_video_service_bkd()
                 video_service.stop_processing()
@@ -377,12 +382,11 @@ import os
 from flask import request, jsonify
 
 
-
 @inference_bp.route("/set_config_json", methods=["POST"])
 def set_config_json():
     try:
         config_data = request.get_json()
-       
+
         if config_data is None:
             return jsonify({"error": "No JSON data provided"}), 400
 
@@ -390,7 +394,7 @@ def set_config_json():
 
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=4, ensure_ascii=False)
-       
+
         return (
             jsonify(
                 {"message": "Configuration saved successfully", "file_path": file_path}

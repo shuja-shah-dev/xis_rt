@@ -34,7 +34,7 @@ class AppConfig:
         self.input_type = "video"
         if src == "baked_baguette":
             self.video_path = os.path.join(
-                os.path.dirname(__file__), "runtime_videos", "baked_baguette.avi"
+                os.path.dirname(__file__), "runtime_videos", "baked_baguette.mp4"
             )
             self.video_on = "baked_baguette"
         elif src == "raw_dough":
