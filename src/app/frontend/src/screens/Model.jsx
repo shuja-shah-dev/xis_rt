@@ -10,7 +10,7 @@ const Model = ({ setActiveScreen, selectedVideo, setModelStatus , setShowMeasure
 
   const categories = [
     { name: "Generic", models: [{ id: "generic", name: "General Model" }] },
-    { name: "Baked Baguette", models: [{ id: "baked_baguette", name: "Digital Twin Model" }] },
+    { name: "Baked Baguette", models: [{ id: "baked_baguette", name: "Baked Baguette Model" }] },
     { name: "Raw Dough", models: [{ id: "raw_dough", name: "Digital Twin Model" }] },
     { name: "Donut", models: [{ id: "donut", name: "Donut Model" }] },
   ];
