@@ -1,6 +1,9 @@
 import React, { useEffect, useState, useRef } from "react";
 import { io } from "socket.io-client";
 import { BlobLarge } from "../components/Blob";
+import MqttComponent from "../components/MQTTComponent";
+import { FaCode } from "react-icons/fa6";
+import { FaVideo } from "react-icons/fa";
 
 const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketRef }) => {
   const [streaming, setStreaming] = useState(false);
@@ -10,6 +13,8 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
   const [videoEnded, setVideoEnded] = useState(false);
   const [selectedCamera, setSelectedCamera] = useState(null);
   const [selectedMeasurements, setSelectedMeasurements] = useState([]);
+    const [viewMode, setViewMode] = useState("video");
+    
 
   useEffect(() => {
     const savedSelected = localStorage.getItem("selectedCamera");
@@ -156,26 +161,56 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
         Run real-time predictions on feed using the selected trained model
       </p>
 
-      {/* Camera Stream */}
-      <div className="relative h-[680px] border-2 border-[#0E2332] bg-[rgba(0,0,0,0.11)] rounded-xl p-4 flex items-center justify-center mt-6">
-        <div className="relative w-full h-full flex items-center justify-center">
-          <img
-            id="camera-stream"
-            alt="Inference"
-            className={`rounded-xl transition-all duration-300 ${streaming ? "object-none w-full h-full" : "w-10 h-10 object-contain"
-              }`}
-            src={streaming ? undefined : "/play.svg"}
-          />
-          {!streaming && (
-            <>
-              <p className="text-lg absolute bottom-16 w-full text-center">Inference Display</p>
-              <p className="text-sm text-[#73768D] absolute bottom-10 w-full text-center">
-                Initialize Camera and Load Model to Start
-              </p>
-            </>
-          )}
-        </div>
+          <div className="mt-4 flex gap-4">
+        <button
+          onClick={() => setViewMode("video")}
+          className={`px-4 py-2 rounded-lg ${
+            viewMode === "video"
+              ? "bg-[#1272E5] text-white"
+              : "bg-gray-200 text-black"
+          }`}
+        >
+        <FaVideo />
+        </button>
+        <button
+          onClick={() => setViewMode("code")}
+          className={`px-4 py-2 rounded-lg ${
+            viewMode === "code"
+              ? "bg-[#1272E5] text-white"
+              : "bg-gray-200 text-black"
+          }`}
+        >
+          <FaCode size={20}/>
+        </button>
       </div>
+ {viewMode === "video" ? (
+        <div className="relative h-[680px] border-2 border-[#0E2332] bg-[rgba(0,0,0,0.11)] rounded-xl p-4 flex items-center justify-center mt-6">
+          <div className="relative w-full h-full flex items-center justify-center">
+            <img
+              id="camera-stream"
+              alt="Inference"
+              className={`rounded-xl transition-all duration-300 ${
+                streaming ? "object-none w-full h-full" : "w-10 h-10 object-contain"
+              }`}
+              src={streaming ? undefined : "/play.svg"}
+            />
+            {!streaming && (
+              <>
+                <p className="text-lg absolute bottom-16 w-full text-center">
+                  Inference Display
+                </p>
+                <p className="text-sm text-[#73768D] absolute bottom-10 w-full text-center">
+                  Initialize Camera and Load Model to Start
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="mt-6 p-6 rounded-xl bg-slate-900">
+          <MqttComponent />
+        </div>
+      )}
 
 
       <div className="mt-6 flex gap-4 justify-end">

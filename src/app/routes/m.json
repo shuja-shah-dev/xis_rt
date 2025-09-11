@@ -1,12 +1,12 @@
 {
     "ROI": {
-        "x": "224.62",
-        "y": "339.40",
-        "height": "522.00",
-        "width": "139.00"
+        "x": "220.39",
+        "y": "338.34",
+        "height": "514.00",
+        "width": "140.00"
     },
     "reference": {
-        "pixel_length": "174.07",
-        "actual_length": "410"
+        "pixel_length": "229.05",
+        "actual_length": "440"
     }
 }
