@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { io } from "socket.io-client";
+import { BlobLarge } from "../components/Blob";
 
 const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketRef }) => {
   const [streaming, setStreaming] = useState(false);
@@ -267,7 +268,7 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
             <div
               key={item.name}
               onClick={() => enabled && toggleMeasurement(item.name)}
-              className={` w-[200px] h-[160px] rounded-2xl border p-4 flex flex-col text-black items-center justify-center gap-2 transition-colors shadow-sm border-[#0E2332] bg-[rgba(255,255,255,.8)] backdrop-blur-[106px] border-3
+              className={`relative w-[200px] h-[160px] rounded-2xl border p-4 flex flex-col text-white items-center justify-center gap-2 transition-colors shadow-sm border-[#0E2332] bg-[rgba(255,255,255,.1)] backdrop-blur-[106px] border-3
           ${!enabled
                   ? "  cursor-not-allowed"
                   : selected
@@ -275,8 +276,9 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
                     : "cursor-pointer hover:border-[#1272E5]"
                 }`}
             >
-              <img src={item.img} alt={item.name} className="w-26 h-26 object-contain" />
-              <span className="text-sm font-medium"> Measure {item.name}</span>
+              <BlobLarge className="top-[0px] left-[0px] w-[200px] h-[200px]" />
+              <img src={item.img} alt={item.name} className="w-26 h-26 object-contain " />
+              <span className="text-sm font-normal"> Measure {item.name}</span>
             </div>
           );
         })}
