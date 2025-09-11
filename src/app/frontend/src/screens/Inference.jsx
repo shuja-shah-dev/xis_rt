@@ -291,10 +291,10 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
 
       <div className="mt-6 flex justify-end gap-4">
         {[
-          { name: "Outer Diameter", mode: "donut", img: "/icons/2.PNG" },
-          { name: "Inner Diameter", mode: "donut", img: "/icons/1.png" },
-          { name: "Width", mode: "baked_baguette", img: "/icons/3.PNG" },
-          { name: "Height", mode: "baked_baguette", img: "/icons/4.png" },
+          { name: "Outer Diameter", mode: "donut", img: "/ics/1.png" },
+          { name: "Inner Diameter", mode: "donut", img: "/ics/2.png" },
+          { name: "Width", mode: "baked_baguette", img: "/ics/3.png" },
+          { name: "Height", mode: "baked_baguette", img: "/ics/4.png" },
         ].map((item) => {
           const enabled = videoMode === item.mode;
           const selected = selectedMeasurements.includes(item.name);
