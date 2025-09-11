@@ -38,10 +38,25 @@ def get_video_service_bkd():
     return bked_service
 
 
+@inference_bp.route("/config", methods=["GET"])
+def get_config():
+    config = app_config.get_config()
+    return jsonify({
+        "video_mode": config.get("VIDEO_MODE")
+    }), 200
+
 @inference_bp.route("/stream/normal", methods=["POST"])
 def start_normal_stream():
     """Start normal camera stream"""
     try:
+        data = request.get_json() or {}
+        measurement_mode = data.get("measurement_mode", [])
+        formatted_modes = [m.lower().replace(" ", "_") for m in measurement_mode]
+        mode_string = ",".join(formatted_modes)
+        app_config.set_measurement_mode(mode_string) 
+
+        print(f"Selected measurements: {mode_string}")
+
         print("Starting normal stream request...")
 
         is_valid, message = app_config.validate_config()
@@ -129,7 +144,10 @@ def start_normal_stream():
                 RUNTIME_CONFIG["config_path"] = os.path.join(
                     os.path.dirname(__file__), "m.json"
                 )
-                RUNTIME_CONFIG["button"] = "[outer_diameter,inner_diameter]"
+                # RUNTIME_CONFIG["button"] = "[outer_diameter,inner_diameter]"
+                RUNTIME_CONFIG["button"] = app_config.get_measurement_mode()
+                print(f"Runtime config buttons: {RUNTIME_CONFIG['button']}")
+
                 video_service = get_video_dont()
                 video_service.stop_processing()
                 if video_service.initialize_from_config(RUNTIME_CONFIG):
@@ -359,11 +377,12 @@ import os
 from flask import request, jsonify
 
 
+
 @inference_bp.route("/set_config_json", methods=["POST"])
 def set_config_json():
     try:
         config_data = request.get_json()
-
+       
         if config_data is None:
             return jsonify({"error": "No JSON data provided"}), 400
 
@@ -371,7 +390,7 @@ def set_config_json():
 
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=4, ensure_ascii=False)
-
+       
         return (
             jsonify(
                 {"message": "Configuration saved successfully", "file_path": file_path}

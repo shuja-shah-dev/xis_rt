@@ -17,6 +17,13 @@ class AppConfig:
         self.cti_file_location = None
         self.input_type = None
         self.video_on = ""
+        self.measurementMode = ""
+
+    def set_measurement_mode(self, mode):
+        self.measurementMode = mode
+    
+    def get_measurement_mode(self):
+        return self.measurementMode
 
     def set_camera_config(self, cti_file_location):
         self.input_type = "camera"

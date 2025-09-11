@@ -8,7 +8,7 @@ const VideoUploader = ({ onNext, onBack }) => {
   const options = [
     { id: "raw", name: "Raw Dough", apiValue: "raw_dough" },
     { id: "baked", name: "Baked Baguette", apiValue: "baked_baguette" },
-     { id: "donut", name: "Doughnut", apiValue: "donut" },
+     { id: "donut", name: "Donut", apiValue: "donut" },
   ];
 
   const handleSelect = async (id, apiValue) => {

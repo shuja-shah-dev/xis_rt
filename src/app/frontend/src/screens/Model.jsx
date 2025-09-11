@@ -12,7 +12,7 @@ const Model = ({ setActiveScreen, selectedVideo, setModelStatus , setShowMeasure
     { name: "Generic", models: [{ id: "generic", name: "General Model" }] },
     { name: "Baked Baguette", models: [{ id: "baked_baguette", name: "Digital Twin Model" }] },
     { name: "Raw Dough", models: [{ id: "raw_dough", name: "Digital Twin Model" }] },
-    { name: "Doughnut", models: [{ id: "donut", name: "Doughnut Model" }] },
+    { name: "Donut", models: [{ id: "donut", name: "Donut Model" }] },
   ];
 
   useEffect(() => {

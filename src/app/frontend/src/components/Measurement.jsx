@@ -33,7 +33,7 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
   const [stage, setStage] = useState("roi");
   const [tool, setTool] = useState("bbox");
   const [imageUrl, setImageUrl] = useState(
-    "https://images.unsplash.com/photo-1517411029-9ef8ca894182?w=800"
+    "frame_1.png"
   );
   const [imageLoaded, setImageLoaded] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -390,17 +390,19 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
         body: JSON.stringify(resultData),
       }).then((res) => {
         if (res.ok) {
-          alert(
-            `Calibration Complete!\nPixel Distance: ${originalPixelDistance.toFixed(
-              2
-            )} px\nActual Length: ${lengthMm} mm\nScale: ${mmPerPixel.toFixed(
-              4
-            )} mm/pixel`
-          );
+           handleContinue()
+          // alert(
+          //   `Calibration Complete!\nPixel Distance: ${originalPixelDistance.toFixed(
+          //     2
+          //   )} px\nActual Length: ${lengthMm} mm\nScale: ${mmPerPixel.toFixed(
+          //     4
+          //   )} mm/pixel`
+          // );
         }
       });
 
       setShowInput(false);
+     
     }
   };
 
@@ -618,7 +620,7 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
                   active={true}
                 />
               )}
-              <Tooltip title="Use this image" placement="bottom">
+              {/* <Tooltip title="Use this image" placement="bottom">
                 <Box
                   onClick={() => {
                     setImageUrl("/frame_1.png");
@@ -647,7 +649,7 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
                     }}
                   />
                 </Box>
-              </Tooltip>
+              </Tooltip> */}
             </Box>
           </Paper>
 
@@ -719,6 +721,7 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
               Cancel
             </Button>
             <Button
+             type="button"
               onClick={handleCalculate}
               variant="contained"
               disabled={!lengthMm}
@@ -735,9 +738,9 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
       </Box>
 
       {/* Next Button */}
-      <Box sx={{ p: 2, display: "flex", justifyContent: "flex-end" }}>
+      {/* <Box sx={{ p: 2, display: "flex", justifyContent: "flex-end" }}>
         <RoundedButton label="INFER" onClick={handleContinue} active={true} />
-      </Box>
+      </Box> */}
     </>
   );
 };
