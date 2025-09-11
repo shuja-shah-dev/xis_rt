@@ -10,3 +10,4 @@ src/app/core/runtime_videos/
 output
 final.zip
 src/cti/
+src/app/routes/m.json
