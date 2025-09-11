@@ -117,8 +117,9 @@ def start_normal_stream():
                 RUNTIME_CONFIG["config_path"] = os.path.join(
                     os.path.dirname(__file__), "m.json"
                 )
-                # RUNTIME_CONFIG["button"] = "[outer_diameter,inner_diameter]"
                 RUNTIME_CONFIG["button"] = app_config.get_measurement_mode()
+                RUNTIME_CONFIG["score_threshold"] = 0.7
+                RUNTIME_CONFIG["mask_threshold"]= 0.7
 
                 video_service = get_video_service_bkd()
                 video_service.stop_processing()
