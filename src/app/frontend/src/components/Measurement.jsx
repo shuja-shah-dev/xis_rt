@@ -56,36 +56,34 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
   const imageRef = useRef(new Image());
   const containerRef = useRef(null);
 
-    const [videoMode, setVideoMode] = useState(null);
-   const imageUrl =
-  videoMode === "baked_baguette"
-    ? "baguette.png"
-    : videoMode === "donut"
-    ? "frame_1.png"
-    : null;
+  const [videoMode, setVideoMode] = useState(null);
+  const imageUrl =
+    videoMode === "baked_baguette"
+      ? "baguette.png"
+      : videoMode === "donut"
+      ? "frame_1.png"
+      : null;
 
-    useEffect(() => {
-      const fetchConfig = async () => {
-        try {
-          const res = await fetch("http://localhost:5000/api/config");
-          const data = await res.json();
-          if (res.ok) {
-            setVideoMode(data.video_mode);
-          }
-        } catch (err) {
-          console.error("Error fetching config:", err);
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const res = await fetch("http://localhost:5000/api/config");
+        const data = await res.json();
+        if (res.ok) {
+          setVideoMode(data.video_mode);
         }
-      };
-  
-      fetchConfig();
-    }, []);
-  
+      } catch (err) {
+        console.error("Error fetching config:", err);
+      }
+    };
 
-      const handleContinue = () => {
+    fetchConfig();
+  }, []);
+
+  const handleContinue = () => {
     setShowMeasurement(false);
     setActiveScreen("Inference");
   };
-
 
   useEffect(() => {
     const img = imageRef.current;
@@ -143,24 +141,26 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
     ctx.save();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // Apply transformations: translate first, then scale
+    ctx.translate(canvas.width / 2, canvas.height / 2);
     ctx.translate(pan.x, pan.y);
     ctx.scale(zoom, zoom);
+    ctx.translate(-canvas.width / 2, -canvas.height / 2);
 
-    const drawX = (canvasSize.width / zoom - canvasSize.width) / 2;
-    const drawY = (canvasSize.height / zoom - canvasSize.height) / 2;
-
+    // Draw the image at its natural canvas size
     ctx.drawImage(
       imageRef.current,
       0,
       0,
       imageRef.current.width,
       imageRef.current.height,
-      drawX,
-      drawY,
-      canvasSize.width / zoom,
-      canvasSize.height / zoom
+      0,
+      0,
+      canvasSize.width,
+      canvasSize.height
     );
 
+    // Draw ROI and keypoints with proper scaling
     if (stage === "roi") {
       if (roi) {
         ctx.strokeStyle = "#4caf50";
@@ -228,8 +228,21 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
 
   const screenToCanvas = (screenX, screenY) => {
     const rect = canvasRef.current.getBoundingClientRect();
-    const x = (screenX - rect.left - pan.x) / zoom;
-    const y = (screenY - rect.top - pan.y) / zoom;
+    const canvas = canvasRef.current;
+
+    // Convert screen coordinates to canvas coordinates
+    const canvasX = screenX - rect.left;
+    const canvasY = screenY - rect.top;
+
+    // Account for the transformations applied in drawCanvas
+    // Reverse the transformations: translate to center, apply pan, scale, translate back
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+
+    // Apply inverse transformations
+    const x = (canvasX - centerX - pan.x) / zoom + centerX;
+    const y = (canvasY - centerY - pan.y) / zoom + centerY;
+
     return { x, y };
   };
 
@@ -414,19 +427,11 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
         body: JSON.stringify(resultData),
       }).then((res) => {
         if (res.ok) {
-           handleContinue()
-          // alert(
-          //   `Calibration Complete!\nPixel Distance: ${originalPixelDistance.toFixed(
-          //     2
-          //   )} px\nActual Length: ${lengthMm} mm\nScale: ${mmPerPixel.toFixed(
-          //     4
-          //   )} mm/pixel`
-          // );
+          handleContinue();
         }
       });
 
       setShowInput(false);
-     
     }
   };
 
@@ -644,36 +649,6 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
                   active={true}
                 />
               )}
-              {/* <Tooltip title="Use this image" placement="bottom">
-                <Box
-                  onClick={() => {
-                    setImageUrl("/frame_1.png");
-                    handleReset();
-                  }}
-                  sx={{
-                    width: 60,
-                    height: 60,
-                    borderRadius: 1,
-                    overflow: "hidden",
-                    cursor: "pointer",
-                    "&:hover": {
-                      borderColor: "white",
-                      transform: "scale(1.05)",
-                    },
-                    transition: "all 0.2s ease",
-                  }}
-                >
-                  <img
-                    src="/frame_1.png"
-                    alt="Sample"
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "cover",
-                    }}
-                  />
-                </Box>
-              </Tooltip> */}
             </Box>
           </Paper>
 
@@ -696,7 +671,6 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
               style={{
-                // backgroundColor: "white",
                 boxShadow: "0 4px 6px rgba(0,0,0,0.1)",
                 maxWidth: "100%",
                 maxHeight: "100%",
@@ -745,7 +719,7 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
               Cancel
             </Button>
             <Button
-             type="button"
+              type="button"
               onClick={handleCalculate}
               variant="contained"
               disabled={!lengthMm}
@@ -760,11 +734,6 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
           </DialogActions>
         </Dialog>
       </Box>
-
-      {/* Next Button */}
-      {/* <Box sx={{ p: 2, display: "flex", justifyContent: "flex-end" }}>
-        <RoundedButton label="INFER" onClick={handleContinue} active={true} />
-      </Box> */}
     </>
   );
 };
