@@ -32,9 +32,7 @@ import { BlobLarge } from "./Blob";
 const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
   const [stage, setStage] = useState("roi");
   const [tool, setTool] = useState("bbox");
-  const [imageUrl, setImageUrl] = useState(
-    "frame_1.png"
-  );
+
   const [imageLoaded, setImageLoaded] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
@@ -58,10 +56,36 @@ const ImageMeasurementTool = ({ setActiveScreen, setShowMeasurement }) => {
   const imageRef = useRef(new Image());
   const containerRef = useRef(null);
 
-  const handleContinue = () => {
+    const [videoMode, setVideoMode] = useState(null);
+   const imageUrl =
+  videoMode === "baked_baguette"
+    ? "baguette.png"
+    : videoMode === "donut"
+    ? "frame_1.png"
+    : null;
+
+    useEffect(() => {
+      const fetchConfig = async () => {
+        try {
+          const res = await fetch("http://localhost:5000/api/config");
+          const data = await res.json();
+          if (res.ok) {
+            setVideoMode(data.video_mode);
+          }
+        } catch (err) {
+          console.error("Error fetching config:", err);
+        }
+      };
+  
+      fetchConfig();
+    }, []);
+  
+
+      const handleContinue = () => {
     setShowMeasurement(false);
     setActiveScreen("Inference");
   };
+
 
   useEffect(() => {
     const img = imageRef.current;

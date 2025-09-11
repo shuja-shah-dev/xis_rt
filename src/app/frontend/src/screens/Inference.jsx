@@ -190,14 +190,29 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
         ) : (
           <button
             onClick={handleDisconnect}
-            disabled={disconnecting || (selectedCamera === "Video As Webcam" && !videoEnded)}
-            className={`px-5 py-2 rounded-xl text-white text-md transition-colors ${disconnecting || (selectedCamera === "Video As Webcam" && !videoEnded)
-              ? "bg-gray-500 cursor-not-allowed"
-              : "bg-[#dc2626] hover:bg-red-700 cursor-pointer"
+            disabled={
+              disconnecting ||
+              (
+                videoMode !== "donut" &&
+                videoMode !== "baked_baguette" &&
+                selectedCamera === "Video As Webcam" &&
+                !videoEnded
+              )
+            }
+            className={`px-5 py-2 rounded-xl text-white text-md transition-colors ${disconnecting ||
+                (
+                  videoMode !== "donut" &&
+                  videoMode !== "baked_baguette" &&
+                  selectedCamera === "Video As Webcam" &&
+                  !videoEnded
+                )
+                ? "bg-gray-500 cursor-not-allowed"
+                : "bg-[#dc2626] hover:bg-red-700 cursor-pointer"
               }`}
           >
             {disconnecting ? "Disconnecting..." : "Disconnect"}
           </button>
+
         )}
 
         <button
@@ -210,7 +225,7 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
         </button>
 
       </div>
-   
+
       <div className="mt-6 flex justify-end gap-4">
         {[
           { name: "Outer Diameter", mode: "donut" },
