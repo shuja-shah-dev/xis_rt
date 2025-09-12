@@ -296,8 +296,8 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
         {[
           { name: "Outer Diameter", mode: "donut", img: "/ics/1.png", displayName: "Outer Diameter" },
           { name: "Inner Diameter", mode: "donut", img: "/ics/2.png" , displayName: "Inner Diameter" },
-          { name: "Height", mode: "baked_baguette", img: "/ics/3.png", displayName: "Length"  },
-          { name: "Width", mode: "baked_baguette", img: "/ics/4.png" , displayName: "Width" },
+          { name: "Height", mode: "baked_baguette", img: "/ics/4.png", displayName: "Width"  },
+          { name: "Width", mode: "baked_baguette", img: "/ics/3.png" , displayName: "Length" },
         ].map((item) => {
           const enabled = videoMode === item.mode;
           const selected = selectedMeasurements.includes(item.name);
@@ -315,8 +315,8 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
                 }`}
             >
               <BlobLarge className="top-[0px] left-[0px] w-[200px] h-[200px]" />
-              <img src={item.img} alt={item.displayName} className="w-26 h-26 object-contain " />
-              <span className="text-sm font-normal"> Measure {item.displayName}</span>
+              <img src={item.img} alt={item.name} className="w-26 h-26 object-contain " />
+              <span className="text-sm font-normal"> Measure {item.name}</span>
             </div>
           );
         })}
