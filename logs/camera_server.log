@@ -309,3 +309,6 @@ TypeError: The view function for 'inference.start_normal_stream' did not return 
 2025-09-11 16:51:10,679 INFO: Camera server startup [in src/app.py:34]
 2025-09-11 16:51:12,307 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:264]
 2025-09-11 16:54:42,313 INFO: Camera server startup [in src/app.py:34]
+2025-09-12 12:02:31,115 INFO: Camera server startup [in src/app.py:34]
+2025-09-12 12:06:30,505 INFO: Camera server startup [in src/app.py:34]
+2025-09-12 12:10:45,290 INFO: Camera server startup [in src/app.py:34]

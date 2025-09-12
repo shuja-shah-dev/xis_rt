@@ -110,7 +110,10 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
       const data = await res.json();
       if (res.ok) {
         setStreaming(true);
-        setCameraStatus("Connected");
+        if (selectedCamera !== "Video As Webcam"){
+           setCameraStatus("Connected");
+        }
+       
       } else {
         alert(`Failed to start stream: ${data.message || "Unknown error"}`);
       }
@@ -291,10 +294,10 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
 
       <div className="mt-6 flex justify-end gap-4">
         {[
-          { name: "Outer Diameter", mode: "donut", img: "/ics/1.png" },
-          { name: "Inner Diameter", mode: "donut", img: "/ics/2.png" },
-          { name: "Width", mode: "baked_baguette", img: "/ics/3.png" },
-          { name: "Height", mode: "baked_baguette", img: "/ics/4.png" },
+          { name: "Outer Diameter", mode: "donut", img: "/ics/1.png", displayName: "Outer Diameter" },
+          { name: "Inner Diameter", mode: "donut", img: "/ics/2.png" , displayName: "Inner Diameter" },
+          { name: "Height", mode: "baked_baguette", img: "/ics/3.png", displayName: "Length"  },
+          { name: "Width", mode: "baked_baguette", img: "/ics/4.png" , displayName: "Width" },
         ].map((item) => {
           const enabled = videoMode === item.mode;
           const selected = selectedMeasurements.includes(item.name);
@@ -312,8 +315,8 @@ const Inference = ({ setActiveScreen, disconnectStream, setCameraStatus, socketR
                 }`}
             >
               <BlobLarge className="top-[0px] left-[0px] w-[200px] h-[200px]" />
-              <img src={item.img} alt={item.name} className="w-26 h-26 object-contain " />
-              <span className="text-sm font-normal"> Measure {item.name}</span>
+              <img src={item.img} alt={item.displayName} className="w-26 h-26 object-contain " />
+              <span className="text-sm font-normal"> Measure {item.displayName}</span>
             </div>
           );
         })}

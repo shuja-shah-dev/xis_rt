@@ -245,3 +245,8 @@
 2025-09-11 16:06:51,695 ERROR: Unhandled exception: local variable 'engine' referenced before assignment [in E:\Workspace\Shuja\xis_rt\src\app\__init__.py:264]
 2025-09-11 16:08:18,388 INFO: Camera server startup [in app.py:34]
 2025-09-11 16:11:28,930 INFO: Camera server startup [in app.py:34]
+2025-09-12 10:41:46,149 INFO: Camera server startup [in app.py:34]
+2025-09-12 10:48:29,940 INFO: Camera server startup [in app.py:34]
+2025-09-12 10:50:36,854 INFO: Camera server startup [in app.py:34]
+2025-09-12 10:55:48,056 INFO: Camera server startup [in app.py:34]
+2025-09-12 10:59:30,949 INFO: Camera server startup [in app.py:34]
